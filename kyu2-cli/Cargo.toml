@@ -7,3 +7,6 @@ edition = "2021"
 kyu2-core = { path = "../kyu2-core" }
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
+rand_core = { version = "0.6", features = ["std"] }
+rand = "0.8"
+bincode = "1.3"
