@@ -1,9 +1,11 @@
 pub mod fec;
-pub mod pipeline; // <--- This loads the file
+pub mod pipeline;
+pub mod metadata;
 
-// Re-export these so they are available at the top level (kyu2_core::...)
 pub use fec::{WirehairEncoder, WirehairDecoder, FecError};
-pub use pipeline::KyuPipeline; // <--- This fixes your Error
+pub use pipeline::KyuPipeline;
+pub use metadata::SessionManifest;
+
 
 /// Initialize global library state (Wirehair tables).
 pub fn init() {

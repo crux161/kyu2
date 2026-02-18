@@ -8,5 +8,8 @@ zstd = { version = "0.13", features = ["experimental"] }          # tANS compres
 chacha20poly1305 = "0.10" # Encryption (The Shield)
 anyhow = "1.0"
 thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
 
 kyu2-wirehair-sys = { path = "../kyu2-wirehair-sys" }
+
