@@ -14,4 +14,5 @@ x25519-dalek = { version = "2.0", features = ["static_secrets", "serde"] }
 rand_core = { version = "0.6", features = ["std"] }
 
 kyu2-wirehair-sys = { path = "../kyu2-wirehair-sys" }
+rand = "0.10.0"
 

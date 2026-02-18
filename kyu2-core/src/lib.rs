@@ -2,7 +2,9 @@ pub mod fec;
 pub mod pipeline;
 pub mod metadata;
 pub mod handshake;
+pub mod session;
 
+pub use session::{KyuSender, KyuReceiver, KyuEvent};
 pub use handshake::{KeyExchange, HandshakePacket};
 pub use fec::{WirehairEncoder, WirehairDecoder, FecError};
 pub use pipeline::KyuPipeline;
