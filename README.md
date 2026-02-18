@@ -89,6 +89,9 @@ Kyu2 supports chaining nodes. If the link between A and C is weak, you can place
 
 ## 🧬 Protocol Specification
 
+### Kyu2 is still in active development and may experience breaking changes.
+Please refer to ```SPEC.md``` for the current requirements.
+
 Kyu2 uses a custom 18-byte header for every UDP packet to ensure stateless decoding.
 
 | Offset | Type | Field | Description |
