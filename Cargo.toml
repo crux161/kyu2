@@ -1,0 +1,15 @@
+[package]
+name = "kyu2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[workspace]
+resolver = "2"
+
+members = [
+	"kyu2-wirehair-sys",
+	"kyu2-core", "kyu2-cli",
+	"kyu2-cli",
+]

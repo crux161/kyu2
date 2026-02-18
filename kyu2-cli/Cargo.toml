@@ -1,0 +1,9 @@
+[package]
+name = "kyu2-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+kyu2-core = { path = "../kyu2-core" }
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
