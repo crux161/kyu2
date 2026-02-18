@@ -8,7 +8,7 @@
 
 Kyu2 uses a unique "Squeeze, Seal, & Spray" pipeline to ensure data integrity and confidentiality over unreliable networks.
 
-```mermaid
+```
 graph LR
     A[Raw Data] -->|Zstd (tANS)| B(Compressed Block)
     B -->|ChaCha20-Poly1305| C(Encrypted Blob)
