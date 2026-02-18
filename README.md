@@ -4,6 +4,9 @@
 
 > *"The Master does nothing, yet he leaves nothing undone"*
 
+![Happy Lunar New Year!](images/2026LNY.png)
+
+
 ## 🌊 Architecture
 
 Kyu2 uses a unique "Squeeze, Seal, & Spray" pipeline to ensure data integrity and confidentiality over unreliable networks.
