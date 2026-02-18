@@ -1,57 +1,50 @@
-## 🧬 Kyu2 Wire Format (v1.1)
+# Kyu2 Wire Format (v2.0)
 
-The protocol is designed to be **stateless** and **atomic**. Every UDP packet contains enough geometry to initialize a decoder without a back-and-forth handshake.
+The protocol is designed to be **stateless**, **multiplexed**, and **adversarially resistant**.
 
-### **1. The UDP Packet Layout**
+## 1. Handshake Phase (Type `H`)
+Initiates the X25519 Diffie-Hellman key exchange.
 
-Every packet sent over the wire follows this 18-byte header structure, followed by the Variable Length Payload (VLP).
+| Offset | Size | Field | Description |
+| :--- | :--- | :--- | :--- |
+| **0** | `1` | **Type** | `0x48` (b'H') |
+| **1** | `VLP` | **Bincode Blob** | Contains `ProtocolVersion` (u16), `SessionID` (u64), and `PublicKey` (32 bytes). |
 
+---
+
+## 2. Data Stream Phase (Type `D`)
+
+Every data packet is padded to exactly **1400 bytes** to prevent traffic analysis. The payload size is hidden within the encrypted header. 
+
+
+
+### Packet Layout
+| Offset | Size | Field | Description |
+| :--- | :--- | :--- | :--- |
+| **0** | `1` | **Type** | `0x44` (b'D') |
+| **1** | `8` | **Session ID** | Plaintext. Used by receiver to look up the X25519 Shared Secret. |
+| **9** | `22` | **Masked Header** | The XOR-obfuscated geometry. |
+| **31** | `VLP`| **Payload** | The raw Wirehair droplet data (up to `Pkt Size`). |
+| **Varies**| `VLP`| **Padding** | Zeros appended to reach exactly 1400 bytes. |
+
+---
+
+### 3. The Masked Header (22 Bytes)
+To prevent stream tracking and replay analysis, the 22-byte geometry header is XOR-masked before transmission.
+
+**Plaintext Geometry:**
 | Offset | Type | Field | Description |
-| --- | --- | --- | --- |
-| **0** | `u64` | **Block ID** | The chunk index. **Block 0** is reserved for the `SessionManifest`. |
-| **8** | `u32` | **Seq ID** | The FEC droplet index.  are systematic;  are repair. |
-| **12** | `u32` | **Total Size** | Total bytes of the *encrypted blob* for this specific Block ID. |
-| **16** | `u16` | **Pkt Size** | The size of each FEC droplet (Geometry). |
-| **18** | `[u8]` | **Payload** | The raw Wirehair-encoded data. |
+| :--- | :--- | :--- | :--- |
+| **0** | `u32` | **Stream ID** | Multiplexing ID for the specific file. |
+| **4** | `u64` | **Block ID** | Chunk index. Block 0 is the `SessionManifest`. |
+| **12** | `u32` | **Seq ID** | FEC droplet index. |
+| **16** | `u32` | **Total Size** | Total bytes of the encrypted blob for this Block. |
+| **20** | `u16` | **Pkt Size** | Size of the valid Payload in this UDP packet. |
 
----
+**Masking Algorithm:**
+1. Extract the first 12 bytes of the Payload. This is the **Dynamic Nonce**.
+2. Initialize ChaCha20 with the `SharedSecret` and the `Dynamic Nonce`.
+3. Encrypt a 22-byte array of zeros `[0u8; 22]` to generate the **Keystream Mask**.
+4. Apply a bitwise XOR between the Plaintext Geometry and the Keystream Mask.
 
-### **2. Logical Mapping**
-
-The protocol operates in two distinct phases based on the **Block ID**.
-
-#### **Phase A: The Manifest (Block 0)**
-
-The payload of Block 0, once recovered and decrypted, is a **Bincode-serialized** `SessionManifest`.
-
-* **Filename:** UTF-8 String.
-* **File Size:** `u64` (Total bytes of the actual file).
-* **Timestamp:** `u64` (Unix epoch).
-
-#### **Phase B: The Data Stream (Blocks 1..N)**
-
-All subsequent Block IDs contain the raw bytes of the file, processed through the **Kyu Pipeline**.
-
----
-
-### **3. The Security Layer (Kyu Pipeline)**
-
-Before data enters the Wirehair encoder, it is transformed by the pipeline. The receiver must reverse this after FEC recovery.
-
-1. **Compression:** `Zstd (tANS)` - Reduces entropy and size.
-2. **Encryption:** `ChaCha20-Poly1305` - Authenticated encryption.
-* **Key:** 32-byte shared secret.
-* **Nonce:** 12 bytes. Composed of `[0u8; 4]` + `BlockID` (8 bytes).
-* **AAD:** The `BlockID` is passed as Additional Authenticated Data to prevent "Block Swapping" attacks.
-
-
-
----
-
-### **4. FEC Geometry Constraints**
-
-To ensure the **Wirehair** engine functions correctly:
-
-* **N ≥ 2:** If the encrypted blob size is less than or equal to the `TARGET_PACKET_SIZE` (1400 bytes), the `Pkt Size` is automatically halved to force at least two packets.
-* **Alignment:** The `Total Size` in the header is the size of the *protected blob*, not the original raw data. The receiver uses this exact value to initialize `WirehairDecoder`.
-
+Because the payload is previously encrypted via ChaCha20-Poly1305 (using `BlockID` as AAD), the first 12 bytes are statistically random and guaranteed to change for every FEC droplet, ensuring the Keystream Mask is highly dynamic.

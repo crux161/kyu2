@@ -314,6 +314,10 @@ static void gf256_architecture_init()
     }
 #endif
 
+if (CpuHasNeon || CpuHasNeon64) {
+	//just shut up!
+}
+
 #if defined(LINUX_ARM)
     // Check for NEON support on other ARM/Linux platforms
     checkLinuxARMNeonCapabilities(CpuHasNeon);

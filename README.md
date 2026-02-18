@@ -11,104 +11,58 @@
 
 Kyu2 uses a unique "Squeeze, Seal, & Spray" pipeline to ensure data integrity and confidentiality over unreliable networks.
 
-```
+```mermaid
 graph LR
-    A[Raw Data] -->|Zstd (tANS)| B(Compressed Block)
+    A[Raw Data] -->|Zstd| B(Compressed)
     B -->|ChaCha20-Poly1305| C(Encrypted Blob)
     C -->|Wirehair FEC| D{Droplets}
-    D -->|UDP Blast| E[Network]
+    D -->|QUIC-Style XOR Mask| E(Obfuscated Header)
+    E -->|1400B Padding| F[UDP Blast]
 ```
 
-1.  **Compression (Squeeze):** Data is compressed using Zstandard (tANS) to maximize throughput.
-2.  **Encryption (Seal):** Data is authenticated and encrypted using ChaCha20-Poly1305. The Block ID serves as the Nonce, eliminating IV overhead.
-3.  **Forward Error Correction (Spray):** The blob is encoded using **Wirehair** (O(N) Fountain Code). This allows the receiver to recover the file from *any* subset of packets, regardless of loss.
+1.  **Compression (Squeeze):** Data is compressed using Zstandard (tANS).
+2.  **Encryption (Seal):** Authenticated encryption via ChaCha20-Poly1305 using an X25519 ephemeral shared secret.
+3.  **Forward Error Correction (Spray):** Data is encoded using **Wirehair** (O(N) Fountain Code), allowing recovery from any subset of packets.
+4.  **Header Protection (Mask):** The packet geometry is XOR-masked using a dynamic nonce derived from the encrypted payload, preventing stream tracking.
+5.  **Traffic Obfuscation:** Every network packet is padded to exactly 1400 bytes. An observer cannot distinguish between file transfers, handshakes, or silence.
 
 ---
 
 ## 🚀 Features
 
-* **Self-Healing Mesh:** Includes a `Relay` mode. Intermediate nodes recover the file and mathematically regenerate *fresh* packets to forward to the destination.
-* **Dynamic Geometry:** Automatically adjusts packet sizes (43 bytes to 1400 bytes) based on payload size to satisfy FEC requirements.
-* **Stateless Header:** Every packet contains the geometry needed to decode it. No handshakes required.
-* **Zero-Copy Design:** Built on `kyu2-core`, designed for integration into GUI applications.
+* **Multiplexing:** Send hundreds of files simultaneously over a single UDP port. Head-of-Line (HoL) blocking is mathematically eliminated.
+* **1-RTT Handshake:** Ephemeral X25519 key exchange establishes forward secrecy before any data flows.
+* **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
+* **Adversarial Resistance:** Packet sizes are static (1400B), and sequence numbers are encrypted.
+* **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Installation & Usage
 
 Ensure you have Rust and Cargo installed.
 
 ```bash
-# Build the CLI tool
 cargo build --release -p kyu2-cli
-
-# The binary will be at:
-./target/release/kyu2-cli
 ```
 
----
-
-## 📖 Usage
-
-### 1. Simple File Transfer
-
-**Receiver (Window 1):**
+**Receiver (Listen on Port 8080):**
 ```bash
-# Listen on port 8080 and save to output.txt
-./kyu2-cli recv --bind 0.0.0.0:8080 -o output.txt
+./target/release/kyu2-cli recv --bind 0.0.0.0:8080 --out-dir ./downloads
 ```
 
-**Sender (Window 2):**
+**Sender (Send a file):**
 ```bash
-# Send a file to localhost:8080
-./kyu2-cli send my_file.txt --dest 127.0.0.1:8080
+./target/release/kyu2-cli send my_video.mp4 --dest 127.0.0.1:8080
 ```
-
-### 2. The "Nano-P2P" Relay (Mesh Mode)
-
-Kyu2 supports chaining nodes. If the link between A and C is weak, you can place B in the middle. B will recover the file and generate *new* repair packets for C.
-
-**Node C (Destination):**
-```bash
-./kyu2-cli recv --bind 0.0.0.0:9090 -o final.txt
-```
-
-**Node B (The Relay):**
-```bash
-# Receives on 8080, saves a local copy, and relays to 9090
-./kyu2-cli recv --bind 0.0.0.0:8080 -o relay_copy.txt --relay 127.0.0.1:9090
-```
-
-**Node A (Source):**
-```bash
-# Sends to the Relay (B)
-./kyu2-cli send my_file.txt --dest 127.0.0.1:8080
-```
-
----
-
-## 🧬 Protocol Specification
-
-### Kyu2 is still in active development and may experience breaking changes.
-Please refer to ```SPEC.md``` for the current requirements.
-
-Kyu2 uses a custom 18-byte header for every UDP packet to ensure stateless decoding.
-
-| Offset | Type | Field | Description |
-| :--- | :--- | :--- | :--- |
-| 0 | `u64` | **Block ID** | Monotonically increasing ID for the file chunk. |
-| 8 | `u32` | **Seq ID** | The "Droplet" ID. 0..N are systematic, N+ are repair. |
-| 12 | `u32` | **Total Size** | The total size of the encrypted blob for this block. |
-| 16 | `u16` | **Pkt Size** | The size of each individual droplet (payload). |
-| 18 | `[u8]` | **Payload** | The Wirehair encoded data. |
 
 ---
 
 ## 📦 Project Structure
 
-* `kyu2-core`: The safe Rust API. Handles the Pipeline and FEC logic.
-* `kyu2-cli`: The command-line interface application.
-* `kyu2-wirehair-sys`: Low-level C++ bindings to the Wirehair library (O(N) Fountain Code).
+* `kyu2-core`: The safe Rust library exposing a clean, event-driven API (`KyuSender` / `KyuReceiver`). Ready for GUI integration.
+* `kyu2-cli`: The command-line interface driver.
+* `kyu2-wirehair-sys`: Low-level C++ bindings to the Wirehair FEC engine.
 
 ## 📜 License
 

@@ -13,6 +13,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Send a file to a destination
     Send {
         input_file: String,
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -20,6 +21,7 @@ enum Commands {
         #[arg(long, default_value_t = 1.1)]
         redundancy: f32,
     },
+    /// Receive files on a port
     Recv {
         #[arg(long, default_value = "0.0.0.0:8080")]
         bind: String,
@@ -39,17 +41,19 @@ fn main() -> Result<()> {
         Commands::Send { input_file, dest, redundancy } => {
             let sender = KyuSender::new(&dest)?;
             
-            // The "Event Loop" is now just a closure!
+            // The "Event Loop" is a simple closure reacting to the library
             sender.send_file(Path::new(&input_file), redundancy, |event| {
                 match event {
                     KyuEvent::Log(msg) => println!("{}", msg),
                     KyuEvent::HandshakeInitiated => println!(">>> [Handshake] Initiating..."),
                     KyuEvent::HandshakeComplete => println!(">>> [Handshake] Secure Tunnel Established."),
-                    KyuEvent::Progress { current, total } => {
-                        print!("\r  -> [Data] Sent {} / {} bytes...", current, total);
+                    KyuEvent::Progress { stream_id, current, total } => {
+                        print!("\r  -> [Stream {:x}] Sent {} / {} bytes...", stream_id, current, total);
                         let _ = std::io::stdout().flush();
                     },
-                    KyuEvent::TransferComplete { .. } => println!("\n>>> Done."),
+                    KyuEvent::TransferComplete { stream_id, .. } => {
+                        println!("\n>>> [Stream {:x}] Done.", stream_id);
+                    },
                     KyuEvent::Error(e) => eprintln!("\n!!! Error: {}", e),
                     _ => {}
                 }
@@ -65,18 +69,18 @@ fn main() -> Result<()> {
                 match event {
                     KyuEvent::Log(msg) => println!("{}", msg),
                     KyuEvent::HandshakeComplete => {
-                        println!("<<< [Handshake] New Session Established: #{:x}", session_id);
+                        println!("<<< [Handshake] Session #{:x}", session_id);
                     }
-                    KyuEvent::FileDetected { name, size } => {
-                        println!("<<< [Session {:x}] Incoming File: '{}' ({})", session_id, name, size);
+                    KyuEvent::FileDetected { stream_id, name, size } => {
+                        println!("\n<<< [Session {:x} | Stream {:x}] Incoming File: '{}' ({})", session_id, stream_id, name, size);
                     }
-                    KyuEvent::Progress { current, total } => {
-                        // We only show progress for the active session in this simple CLI
-                        print!("\r  -> [Session {:x}] {} / {} bytes...", session_id, current, total);
+                    KyuEvent::Progress { stream_id, current, total } => {
+                        // We use carriage return (\r) to animate the progress bar
+                        print!("\r  -> [Stream {:x}] {} / {} bytes...", stream_id, current, total);
                         let _ = std::io::stdout().flush();
                     }
-                    KyuEvent::TransferComplete { path } => {
-                        println!("\n<<< [Session {:x}] Transfer Complete! Saved to: {:?}", session_id, path);
+                    KyuEvent::TransferComplete { stream_id, path } => {
+                        println!("\n<<< [Stream {:x}] Transfer Complete! Saved to: {:?}", stream_id, path);
                     }
                     KyuEvent::Error(e) => eprintln!("\n!!! Error: {}", e),
                     _ => {}
