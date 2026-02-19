@@ -33,6 +33,7 @@ graph LR
 * **Multiplexing:** Send hundreds of files simultaneously over a single UDP port. Head-of-Line (HoL) blocking is mathematically eliminated.
 * **1-RTT + 0-RTT Handshakes:** New clients use PSK-authenticated X25519; recently authenticated clients can resume with encrypted tickets for 0-RTT startup.
 * **0-RTT Anti-Replay Guard:** Receivers reject duplicate ticket-id + client-nonce binder tuples until ticket expiry.
+* **Bounded Known-Client Cache:** Receiver tracks authenticated client IDs in a pruned, capped in-memory map (no unbounded growth).
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
 * **Adversarial Resistance:** Packet sizes are static (1200B), and sequence numbers are encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.

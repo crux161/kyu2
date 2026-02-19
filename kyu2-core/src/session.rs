@@ -67,6 +67,10 @@ const SOURCE_BUCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESUME_REPLAY_ENTRIES: usize = 65_536;
 /// Small skew allowance so near-expiry accepted tuples are still rejected if replayed.
 const RESUME_REPLAY_SKEW_SECS: u64 = 30;
+/// Absolute cap on tracked authenticated client IDs for 0-RTT lookup.
+const MAX_KNOWN_CLIENTS: usize = 65_536;
+/// Small skew allowance to avoid immediate churn when pruning known clients.
+const KNOWN_CLIENT_SKEW_SECS: u64 = 30;
 
 const TYPE_DATA: u8 = b'D';
 const TYPE_HANDSHAKE: u8 = b'H';
@@ -860,6 +864,7 @@ struct ReceiverCounters {
     handshakes_accepted: u64,
     handshakes_rejected: u64,
     resume_replay_rejected: u64,
+    known_client_registered: u64,
     stream_limit_rejected: u64,
     decoder_memory_rejected: u64,
 }
@@ -875,6 +880,8 @@ struct ResumeReplayKey {
 #[derive(Default)]
 struct ReceiverRuntime {
     sessions: HashMap<u64, SessionState>,
+    known_clients: HashMap<[u8; 16], u64>,
+    known_client_order: VecDeque<[u8; 16]>,
     resume_replay: HashMap<ResumeReplayKey, u64>,
     resume_replay_order: VecDeque<ResumeReplayKey>,
     total_decoder_memory_bytes: u64,
@@ -945,6 +952,37 @@ impl ReceiverRuntime {
             .retain(|_, expires_at| *expires_at >= now_secs);
         self.resume_replay_order
             .retain(|key| self.resume_replay.contains_key(key));
+    }
+
+    /// Tracks a recently authenticated client ID with bounded memory and expiry.
+    fn register_known_client(&mut self, client_id: [u8; 16], expires_at: u64, now_secs: u64) {
+        self.sweep_known_clients(now_secs);
+
+        let expiry = expires_at.saturating_add(KNOWN_CLIENT_SKEW_SECS);
+        if let Some(stored_expiry) = self.known_clients.get_mut(&client_id) {
+            *stored_expiry = (*stored_expiry).max(expiry);
+            return;
+        }
+
+        self.known_clients.insert(client_id, expiry);
+        self.known_client_order.push_back(client_id);
+        self.counters.known_client_registered =
+            self.counters.known_client_registered.saturating_add(1);
+
+        while self.known_clients.len() > MAX_KNOWN_CLIENTS {
+            let Some(oldest_client_id) = self.known_client_order.pop_front() else {
+                break;
+            };
+            self.known_clients.remove(&oldest_client_id);
+        }
+    }
+
+    /// Removes expired known-client entries and compacts ordering metadata.
+    fn sweep_known_clients(&mut self, now_secs: u64) {
+        self.known_clients
+            .retain(|_, expires_at| *expires_at >= now_secs);
+        self.known_client_order
+            .retain(|client_id| self.known_clients.contains_key(client_id));
     }
 }
 
@@ -1101,6 +1139,7 @@ impl KyuReceiver {
             .total_decoder_memory_bytes
             .saturating_sub(reclaimed_memory);
         runtime.rate_limiter.sweep_idle(now);
+        runtime.sweep_known_clients(now_secs);
         runtime.sweep_resume_replay(now_secs);
 
         on_event(
@@ -1168,6 +1207,26 @@ impl KyuReceiver {
             KyuEvent::Metric {
                 name: "receiver.resume_replay_rejected",
                 value: runtime.counters.resume_replay_rejected,
+                session_id: None,
+                stream_id: None,
+                trace_id: None,
+            },
+        );
+        on_event(
+            0,
+            KyuEvent::Metric {
+                name: "receiver.known_client_registered",
+                value: runtime.counters.known_client_registered,
+                session_id: None,
+                stream_id: None,
+                trace_id: None,
+            },
+        );
+        on_event(
+            0,
+            KyuEvent::Metric {
+                name: "receiver.known_clients_active",
+                value: runtime.known_clients.len() as u64,
                 session_id: None,
                 stream_id: None,
                 trace_id: None,
@@ -1258,8 +1317,15 @@ impl KyuReceiver {
 
         let server_keys = KeyExchange::new();
         let server_public = *server_keys.public.as_bytes();
+        let now_secs = unix_now_secs();
         let session_ticket =
             issue_session_ticket(&self.ticket_key, SESSION_TICKET_LIFETIME_SECS).ok();
+        if let Some(ticket) = session_ticket.as_ref()
+            && let Some(validated) =
+                validate_ticket_identity(&self.ticket_key, &ticket.identity, now_secs)
+        {
+            runtime.register_known_client(validated.client_id, validated.expires_at, now_secs);
+        }
         let reply = HandshakePacket::new_server(
             client_hello.session_id,
             server_public,
@@ -1476,6 +1542,12 @@ impl KyuReceiver {
             );
             return;
         };
+
+        runtime.register_known_client(
+            validated_ticket.client_id,
+            validated_ticket.expires_at,
+            now_secs,
+        );
 
         if let Some(previous) = runtime.sessions.remove(&resume.session_id) {
             runtime.total_decoder_memory_bytes = runtime
