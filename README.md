@@ -38,6 +38,7 @@ graph LR
 * **Adaptive FEC Control:** Receivers emit decode-efficiency feedback and senders dynamically tune redundancy in flight.
 * **Relay Route Fallbacks:** Senders can try trusted relay routes when direct handshakes fail.
 * **Pluggable Handshake Engine:** Handshake logic is abstracted behind a trait so standardized engines can replace the default implementation.
+* **WebRTC Transport Mode (Feature-Gated):** `webrtc-rs` integration provides ICE/STUN/TURN negotiation and DTLS/SRTP-backed peer connectivity.
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
 * **Adversarial Resistance:** Header geometry and sequence mapping remain authenticated and encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
@@ -51,6 +52,11 @@ Ensure you have Rust and Cargo installed.
 
 ```bash
 cargo build --release -p kyu2-cli
+```
+
+Build with WebRTC transport support:
+```bash
+cargo build --release -p kyu2-cli --features webrtc
 ```
 
 Optional: set a shared PSK explicitly (recommended for non-local deployments):
@@ -107,6 +113,32 @@ Persist `--ticket-key` in platform secure storage (for example, iOS Keychain) so
 
 **Library frame-mode integration (non-filesystem I/O):**
 Use `FrameSource`/`FrameSink` with `KyuSender::send_stream_from_source(...)` and `KyuReceiver::run_loop_frames(...)` for channel-driven media pipelines.
+
+**WebRTC receiver (ICE/STUN/TURN + DTLS/SRTP engine):**
+```bash
+./target/release/kyu2-cli webrtc-recv \
+  --signal-in ./offer.json \
+  --signal-out ./answer.json \
+  --out-dir ./downloads \
+  --ice stun:stun.l.google.com:19302 \
+  --ice turn:turn.example.net:3478?transport=udp \
+  --turn-username alice \
+  --turn-credential secret
+```
+
+**WebRTC sender (data channel transfer with optional SRTP probe):**
+```bash
+./target/release/kyu2-cli webrtc-send \
+  --input ./clip.bin \
+  --signal-out ./offer.json \
+  --signal-in ./answer.json \
+  --ice stun:stun.l.google.com:19302 \
+  --ice turn:turn.example.net:3478?transport=udp \
+  --turn-username alice \
+  --turn-credential secret \
+  --srtp-probe
+```
+These commands exchange SDP through local files for signaling; once connected, ICE candidate pairs are selected automatically and payloads run through standardized WebRTC DTLS transport. With `--srtp-probe`, an Opus sample is emitted so SRTP media flow is exercised.
 
 **Structured JSON output (for dashboards/log pipelines):**
 ```bash

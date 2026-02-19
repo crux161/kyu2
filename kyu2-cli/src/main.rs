@@ -4,6 +4,8 @@ use kyu2_core::{
     init, parse_psk_hex, CompressionMode, FecPolicy, KyuEvent, KyuReceiver, KyuSender, PaddingMode,
     PipelineConfig, TransportConfig,
 };
+#[cfg(feature = "webrtc")]
+use kyu2_core::{IceServerConfig, WebRtcConfig, WebRtcPeer};
 use rand::random;
 use serde_json::json;
 use std::cell::RefCell;
@@ -12,7 +14,11 @@ use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "webrtc")]
+use std::time::Duration;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "webrtc")]
+use tokio::runtime::Builder as TokioRuntimeBuilder;
 
 #[derive(Parser)]
 #[command(name = "kyu2", about = "Zen-Mode UDP File Transfer Engine")]
@@ -116,6 +122,66 @@ enum Commands {
         #[arg(long, default_value_t = 5_000_000)]
         limit: u64,
     },
+    #[cfg(feature = "webrtc")]
+    WebrtcSend {
+        /// Source file to transfer over WebRTC data channel.
+        #[arg(long)]
+        input: String,
+        /// Output file for local SDP offer JSON.
+        #[arg(long)]
+        signal_out: String,
+        /// Input file containing remote SDP answer JSON.
+        #[arg(long)]
+        signal_in: String,
+        /// Optional label for the negotiated data channel.
+        #[arg(long, default_value = "kyu2-data")]
+        channel_label: String,
+        /// ICE servers (`stun:` or `turn:` URI). Repeat for multiple servers.
+        #[arg(long = "ice")]
+        ice_servers: Vec<String>,
+        /// TURN username applied to TURN URIs when provided.
+        #[arg(long)]
+        turn_username: Option<String>,
+        /// TURN credential applied to TURN URIs when provided.
+        #[arg(long)]
+        turn_credential: Option<String>,
+        /// Emits one Opus sample over SRTP after connect to validate media path.
+        #[arg(long, default_value_t = false)]
+        srtp_probe: bool,
+        /// Max wait for signaling + connectivity in seconds.
+        #[arg(long, default_value_t = 90)]
+        timeout_secs: u64,
+    },
+    #[cfg(feature = "webrtc")]
+    WebrtcRecv {
+        /// Directory where transferred files are written.
+        #[arg(long, short = 'd', default_value = ".")]
+        out_dir: String,
+        /// Input file containing remote SDP offer JSON.
+        #[arg(long)]
+        signal_in: String,
+        /// Output file for local SDP answer JSON.
+        #[arg(long)]
+        signal_out: String,
+        /// Optional label filter for accepted data channels.
+        #[arg(long, default_value = "kyu2-data")]
+        channel_label: String,
+        /// ICE servers (`stun:` or `turn:` URI). Repeat for multiple servers.
+        #[arg(long = "ice")]
+        ice_servers: Vec<String>,
+        /// TURN username applied to TURN URIs when provided.
+        #[arg(long)]
+        turn_username: Option<String>,
+        /// TURN credential applied to TURN URIs when provided.
+        #[arg(long)]
+        turn_credential: Option<String>,
+        /// Captures inbound RTP payloads from remote SRTP tracks for observability.
+        #[arg(long, default_value_t = false)]
+        srtp_probe: bool,
+        /// Max wait for signaling + connectivity in seconds.
+        #[arg(long, default_value_t = 90)]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +197,14 @@ const LOCAL_KEYRING_DIR_NAME: &str = "kyu2-local-keyring-v1";
 const LOCAL_KEYRING_TTL_SECS: u64 = 12 * 60 * 60;
 /// Hard cap on keyring entry count to keep disk/memory bounded.
 const LOCAL_KEYRING_MAX_ENTRIES: usize = 512;
+#[cfg(feature = "webrtc")]
+const WEBRTC_FRAME_HEADER: u8 = 1;
+#[cfg(feature = "webrtc")]
+const WEBRTC_FRAME_CHUNK: u8 = 2;
+#[cfg(feature = "webrtc")]
+const WEBRTC_FRAME_FIN: u8 = 3;
+#[cfg(feature = "webrtc")]
+const WEBRTC_CHUNK_SIZE: usize = 16 * 1024;
 
 /// On-disk bootstrap key material for local sender discovery.
 #[derive(Debug, Clone, Copy)]
@@ -577,6 +651,344 @@ fn build_transport_config(
         padding,
         fec,
     }
+}
+
+#[cfg(feature = "webrtc")]
+fn build_webrtc_config(
+    ice_servers: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+) -> Result<WebRtcConfig> {
+    let mut resolved = Vec::new();
+    let configured = if ice_servers.is_empty() {
+        vec![kyu2_core::DEFAULT_STUN_SERVER.to_string()]
+    } else {
+        ice_servers
+    };
+
+    for url in configured {
+        if url.starts_with("turn:") || url.starts_with("turns:") {
+            let username = turn_username
+                .as_ref()
+                .context("TURN URI provided without --turn-username")?;
+            let credential = turn_credential
+                .as_ref()
+                .context("TURN URI provided without --turn-credential")?;
+            resolved.push(IceServerConfig::turn(
+                url,
+                username.to_owned(),
+                credential.to_owned(),
+            ));
+        } else {
+            resolved.push(IceServerConfig::stun(url));
+        }
+    }
+
+    Ok(WebRtcConfig {
+        ice_servers: resolved,
+    })
+}
+
+#[cfg(feature = "webrtc")]
+fn encode_webrtc_header(file_name: &str, file_size: u64) -> Result<Vec<u8>> {
+    let safe_name = Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("payload.bin");
+    let name_bytes = safe_name.as_bytes();
+    if name_bytes.len() > u16::MAX as usize {
+        bail!("file name too long for WebRTC transfer header");
+    }
+
+    let mut packet = Vec::with_capacity(1 + 2 + name_bytes.len() + 8);
+    packet.push(WEBRTC_FRAME_HEADER);
+    packet.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+    packet.extend_from_slice(name_bytes);
+    packet.extend_from_slice(&file_size.to_le_bytes());
+    Ok(packet)
+}
+
+#[cfg(feature = "webrtc")]
+fn decode_webrtc_header(packet: &[u8]) -> Result<(String, u64)> {
+    if packet.len() < 1 + 2 + 8 {
+        bail!("WebRTC header packet too short");
+    }
+    if packet[0] != WEBRTC_FRAME_HEADER {
+        bail!("invalid WebRTC header packet type");
+    }
+
+    let name_len = u16::from_le_bytes([packet[1], packet[2]]) as usize;
+    let header_len = 1 + 2 + name_len + 8;
+    if packet.len() < header_len {
+        bail!("truncated WebRTC header packet");
+    }
+
+    let name_raw =
+        std::str::from_utf8(&packet[3..3 + name_len]).context("invalid UTF-8 file name")?;
+    let safe_name = Path::new(name_raw)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("incoming.bin")
+        .to_string();
+    let size_start = 3 + name_len;
+    let mut size_bytes = [0u8; 8];
+    size_bytes.copy_from_slice(&packet[size_start..size_start + 8]);
+    let file_size = u64::from_le_bytes(size_bytes);
+
+    Ok((safe_name, file_size))
+}
+
+#[cfg(feature = "webrtc")]
+async fn wait_for_signal_file(path: &Path, timeout: Duration) -> Result<String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(raw) = fs::read_to_string(path) {
+            if !raw.trim().is_empty() {
+                return Ok(raw);
+            }
+        }
+        if started.elapsed() >= timeout {
+            bail!("timed out waiting for signaling file: {}", path.display());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[cfg(feature = "webrtc")]
+fn run_webrtc_send_command(
+    json_logs: bool,
+    input: String,
+    signal_out: String,
+    signal_in: String,
+    channel_label: String,
+    ice_servers: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    srtp_probe: bool,
+    timeout_secs: u64,
+) -> Result<()> {
+    let runtime = TokioRuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime for WebRTC mode")?;
+
+    runtime.block_on(async move {
+        let timeout = Duration::from_secs(timeout_secs.max(1));
+        let config = build_webrtc_config(ice_servers, turn_username, turn_credential)?;
+        let peer = WebRtcPeer::new(config).await?;
+
+        let data_channel = peer.create_data_channel(&channel_label).await?;
+        let data_channel_open_wait = {
+            let data_channel = data_channel.clone();
+            tokio::spawn(
+                async move { WebRtcPeer::wait_data_channel_open(&data_channel, timeout).await },
+            )
+        };
+        let srtp_track = if srtp_probe {
+            Some(peer.add_opus_track("kyu2-probe-audio", "kyu2").await?)
+        } else {
+            None
+        };
+
+        let offer = peer.create_offer_sdp().await?;
+        fs::write(&signal_out, offer)
+            .with_context(|| format!("failed to write local SDP offer: {signal_out}"))?;
+        if !json_logs {
+            println!(">>> WebRTC offer written: {}", signal_out);
+            println!(">>> Waiting for remote SDP answer: {}", signal_in);
+        }
+
+        let answer = wait_for_signal_file(Path::new(&signal_in), timeout).await?;
+        peer.set_remote_description_sdp(&answer).await?;
+        peer.wait_connected(timeout).await?;
+        data_channel_open_wait
+            .await
+            .context("data-channel open waiter task failed")??;
+
+        if let Some(track) = srtp_track {
+            WebRtcPeer::write_media_sample(&track, &[0xF8, 0xFF, 0xFE], Duration::from_millis(20))
+                .await?;
+            if !json_logs {
+                println!(">>> SRTP probe sample emitted (Opus payload).");
+            }
+        }
+
+        let input_path = PathBuf::from(&input);
+        let payload = fs::read(&input_path)
+            .with_context(|| format!("failed to read input file: {}", input_path.display()))?;
+        let file_name = input_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("payload.bin");
+        let header = encode_webrtc_header(file_name, payload.len() as u64)?;
+        let _ = WebRtcPeer::send_data_channel_binary(&data_channel, &header).await?;
+
+        let mut sent = 0usize;
+        for chunk in payload.chunks(WEBRTC_CHUNK_SIZE) {
+            let mut packet = Vec::with_capacity(1 + chunk.len());
+            packet.push(WEBRTC_FRAME_CHUNK);
+            packet.extend_from_slice(chunk);
+            let _ = WebRtcPeer::send_data_channel_binary(&data_channel, &packet).await?;
+            sent += chunk.len();
+            if !json_logs {
+                print!(
+                    "\r>>> WebRTC send progress: {sent} / {} bytes",
+                    payload.len()
+                );
+                let _ = std::io::stdout().flush();
+            }
+        }
+        let _ = WebRtcPeer::send_data_channel_binary(&data_channel, &[WEBRTC_FRAME_FIN]).await?;
+        if !json_logs {
+            println!("\n>>> WebRTC transfer complete.");
+        }
+
+        peer.close().await?;
+        Ok(())
+    })
+}
+
+#[cfg(feature = "webrtc")]
+fn run_webrtc_recv_command(
+    json_logs: bool,
+    out_dir: String,
+    signal_in: String,
+    signal_out: String,
+    channel_label: String,
+    ice_servers: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    srtp_probe: bool,
+    timeout_secs: u64,
+) -> Result<()> {
+    let runtime = TokioRuntimeBuilder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime for WebRTC mode")?;
+
+    runtime.block_on(async move {
+        let timeout = Duration::from_secs(timeout_secs.max(1));
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("failed to create output directory: {out_dir}"))?;
+
+        let config = build_webrtc_config(ice_servers, turn_username, turn_credential)?;
+        let peer = WebRtcPeer::new(config).await?;
+        let mut ingress = peer.install_data_channel_ingress(Some(channel_label.clone()), 4096);
+        let mut rtp_ingress = if srtp_probe {
+            Some(peer.install_inbound_rtp_bridge(512))
+        } else {
+            None
+        };
+
+        if !json_logs {
+            println!(">>> Waiting for remote SDP offer: {}", signal_in);
+        }
+        let offer = wait_for_signal_file(Path::new(&signal_in), timeout).await?;
+        let answer = peer.accept_offer_create_answer_sdp(&offer).await?;
+        fs::write(&signal_out, answer)
+            .with_context(|| format!("failed to write local SDP answer: {signal_out}"))?;
+        if !json_logs {
+            println!(">>> WebRTC answer written: {}", signal_out);
+        }
+
+        peer.wait_connected(timeout).await?;
+
+        let mut target_file: Option<fs::File> = None;
+        let mut target_path: Option<PathBuf> = None;
+        let mut expected_size = 0u64;
+        let mut received = 0u64;
+
+        loop {
+            if let Some(rtp_rx) = rtp_ingress.as_mut() {
+                while let Ok(frame) = rtp_rx.try_recv() {
+                    if !json_logs {
+                        println!(
+                            ">>> SRTP probe RTP frame: pt={} seq={} ts={} bytes={}",
+                            frame.payload_type,
+                            frame.sequence_number,
+                            frame.timestamp,
+                            frame.payload.len()
+                        );
+                    }
+                }
+            }
+
+            let packet = tokio::time::timeout(timeout, ingress.recv())
+                .await
+                .context("timed out waiting for WebRTC data packet")?
+                .context("WebRTC data channel closed before transfer completed")?;
+            if packet.payload.is_empty() {
+                continue;
+            }
+
+            match packet.payload[0] {
+                WEBRTC_FRAME_HEADER => {
+                    let (file_name, file_size) = decode_webrtc_header(&packet.payload)?;
+                    expected_size = file_size;
+                    let path = Path::new(&out_dir).join(file_name);
+                    let file = fs::File::create(&path).with_context(|| {
+                        format!("failed to create WebRTC output file: {}", path.display())
+                    })?;
+                    target_path = Some(path.clone());
+                    target_file = Some(file);
+                    if !json_logs {
+                        println!(
+                            ">>> Receiving '{}' ({} bytes) via data channel `{}`",
+                            path.display(),
+                            file_size,
+                            packet.label
+                        );
+                    }
+                }
+                WEBRTC_FRAME_CHUNK => {
+                    let Some(file) = target_file.as_mut() else {
+                        bail!("received WebRTC chunk before header");
+                    };
+                    file.write_all(&packet.payload[1..])
+                        .context("failed writing WebRTC chunk")?;
+                    received = received.saturating_add((packet.payload.len() - 1) as u64);
+                    if !json_logs {
+                        print!("\r<<< WebRTC recv progress: {received} / {expected_size} bytes");
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                WEBRTC_FRAME_FIN => {
+                    if !json_logs {
+                        println!();
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(mut file) = target_file {
+            file.flush().context("failed flushing WebRTC output file")?;
+        }
+
+        if let Some(path) = target_path {
+            if !json_logs {
+                println!(
+                    "<<< WebRTC transfer complete: {} ({} bytes received)",
+                    path.display(),
+                    received
+                );
+            }
+        }
+
+        if expected_size != 0 && received != expected_size {
+            bail!(
+                "incomplete WebRTC file transfer: received {} of {} bytes",
+                received,
+                expected_size
+            );
+        }
+
+        peer.close().await?;
+        Ok(())
+    })
 }
 
 fn print_event_json(mode: &str, session_id: Option<u64>, event: &KyuEvent) {
@@ -1098,6 +1510,56 @@ fn main() -> Result<()> {
                     }
                 }
             })?;
+        }
+        #[cfg(feature = "webrtc")]
+        Commands::WebrtcSend {
+            input,
+            signal_out,
+            signal_in,
+            channel_label,
+            ice_servers,
+            turn_username,
+            turn_credential,
+            srtp_probe,
+            timeout_secs,
+        } => {
+            run_webrtc_send_command(
+                cli.json,
+                input,
+                signal_out,
+                signal_in,
+                channel_label,
+                ice_servers,
+                turn_username,
+                turn_credential,
+                srtp_probe,
+                timeout_secs,
+            )?;
+        }
+        #[cfg(feature = "webrtc")]
+        Commands::WebrtcRecv {
+            out_dir,
+            signal_in,
+            signal_out,
+            channel_label,
+            ice_servers,
+            turn_username,
+            turn_credential,
+            srtp_probe,
+            timeout_secs,
+        } => {
+            run_webrtc_recv_command(
+                cli.json,
+                out_dir,
+                signal_in,
+                signal_out,
+                channel_label,
+                ice_servers,
+                turn_username,
+                turn_credential,
+                srtp_probe,
+                timeout_secs,
+            )?;
         }
     }
 

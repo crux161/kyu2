@@ -3,6 +3,8 @@ pub mod handshake;
 pub mod metadata;
 pub mod pipeline;
 pub mod session;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 
 pub use fec::{FecError, WirehairDecoder, WirehairEncoder};
 pub use handshake::{
@@ -17,6 +19,11 @@ pub use session::{
     ChannelFrameSource, FecPolicy, FrameSink, FrameSource, FrameStreamConfig, InboundFrame,
     KyuErrorCode, KyuEvent, KyuReceiver, KyuSender, MediaFrame, PaddingMode, ReaderFrameSource,
     TransportConfig, parse_psk_hex,
+};
+#[cfg(feature = "webrtc")]
+pub use webrtc::{
+    DEFAULT_STUN_SERVER, IceServerConfig, InboundDataChannelMessage, InboundRtpFrame, WebRtcConfig,
+    WebRtcPeer,
 };
 
 use std::sync::OnceLock;
