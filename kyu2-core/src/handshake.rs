@@ -117,6 +117,8 @@ impl ResumePacket {
 /// Result of validating an opaque ticket identity on the server side.
 #[derive(Debug, Clone, Copy)]
 pub struct ValidatedTicket {
+    /// Server-generated ticket identifier used for anti-replay tracking.
+    pub ticket_id: [u8; 16],
     pub resumption_secret: [u8; 32],
     pub expires_at: u64,
 }
@@ -124,6 +126,7 @@ pub struct ValidatedTicket {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 struct TicketIdentityFields {
     protocol_version: u16,
+    ticket_id: [u8; 16],
     expires_at: u64,
     resumption_secret: [u8; 32],
 }
@@ -484,9 +487,12 @@ pub fn issue_session_ticket(ticket_key: &[u8; 32], lifetime_secs: u64) -> Result
     if resumption_secret == [0u8; 32] {
         resumption_secret[0] = 1;
     }
+    let mut ticket_id = [0u8; 16];
+    OsRng.fill_bytes(&mut ticket_id);
 
     let fields = TicketIdentityFields {
         protocol_version: PROTOCOL_VERSION,
+        ticket_id,
         expires_at,
         resumption_secret,
     };
@@ -548,6 +554,7 @@ pub fn validate_ticket_identity(
     }
 
     Some(ValidatedTicket {
+        ticket_id: fields.ticket_id,
         resumption_secret: fields.resumption_secret,
         expires_at: fields.expires_at,
     })
@@ -729,6 +736,7 @@ mod tests {
         )
         .expect("ticket identity should validate");
 
+        assert_ne!(validated.ticket_id, [0u8; 16]);
         assert_eq!(validated.expires_at, ticket.expires_at);
         assert_eq!(validated.resumption_secret, ticket.resumption_secret);
 
@@ -772,5 +780,27 @@ mod tests {
 
         resume.session_id = 145;
         assert!(!resume.verify(&validated.resumption_secret, ticket.expires_at - 1));
+    }
+
+    #[test]
+    fn ticket_identity_contains_stable_unique_ticket_id() {
+        let ticket_key = [0x77; 32];
+        let ticket_a = issue_session_ticket(&ticket_key, 60).expect("ticket a should be issued");
+        let ticket_b = issue_session_ticket(&ticket_key, 60).expect("ticket b should be issued");
+
+        let validated_a =
+            validate_ticket_identity(&ticket_key, &ticket_a.identity, ticket_a.expires_at - 1)
+                .expect("ticket a should validate");
+        let validated_b =
+            validate_ticket_identity(&ticket_key, &ticket_b.identity, ticket_b.expires_at - 1)
+                .expect("ticket b should validate");
+
+        assert_eq!(
+            validated_a.ticket_id,
+            validate_ticket_identity(&ticket_key, &ticket_a.identity, ticket_a.expires_at - 1)
+                .expect("ticket a should validate repeatedly")
+                .ticket_id
+        );
+        assert_ne!(validated_a.ticket_id, validated_b.ticket_id);
     }
 }

@@ -11,7 +11,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
     aead::{Aead, generic_array::GenericArray},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
@@ -63,6 +63,10 @@ const SOURCE_RATE_LIMIT_PACKETS_PER_SEC: f64 = 5000.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 10000.0;
 /// Idle timeout before a source bucket is dropped.
 const SOURCE_BUCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Absolute cap on tracked 0-RTT binder tuples to keep anti-replay memory bounded.
+const MAX_RESUME_REPLAY_ENTRIES: usize = 65_536;
+/// Small skew allowance so near-expiry accepted tuples are still rejected if replayed.
+const RESUME_REPLAY_SKEW_SECS: u64 = 30;
 
 const TYPE_DATA: u8 = b'D';
 const TYPE_HANDSHAKE: u8 = b'H';
@@ -855,14 +859,24 @@ struct ReceiverCounters {
     packets_rejected: u64,
     handshakes_accepted: u64,
     handshakes_rejected: u64,
+    resume_replay_rejected: u64,
     stream_limit_rejected: u64,
     decoder_memory_rejected: u64,
+}
+
+/// Replay key identifying one accepted 0-RTT binder tuple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ResumeReplayKey {
+    ticket_id: [u8; 16],
+    client_nonce: [u8; 24],
 }
 
 /// Mutable receiver runtime state maintained between loop iterations.
 #[derive(Default)]
 struct ReceiverRuntime {
     sessions: HashMap<u64, SessionState>,
+    resume_replay: HashMap<ResumeReplayKey, u64>,
+    resume_replay_order: VecDeque<ResumeReplayKey>,
     total_decoder_memory_bytes: u64,
     last_gc_sweep: Option<Instant>,
     rate_limiter: SourceRateLimiter,
@@ -887,6 +901,50 @@ impl ReceiverRuntime {
     fn reset_interval(&mut self) {
         self.last_gc_sweep = Some(Instant::now());
         self.counters = ReceiverCounters::default();
+    }
+
+    /// Records a validated ticket/binder tuple and returns false on replay.
+    fn register_resume_nonce(
+        &mut self,
+        ticket_id: [u8; 16],
+        client_nonce: [u8; 24],
+        expires_at: u64,
+        now_secs: u64,
+    ) -> bool {
+        self.sweep_resume_replay(now_secs);
+
+        let key = ResumeReplayKey {
+            ticket_id,
+            client_nonce,
+        };
+        if let Some(stored_expires_at) = self.resume_replay.get_mut(&key) {
+            if *stored_expires_at >= now_secs {
+                return false;
+            }
+            *stored_expires_at = expires_at.saturating_add(RESUME_REPLAY_SKEW_SECS);
+            return true;
+        }
+
+        self.resume_replay
+            .insert(key, expires_at.saturating_add(RESUME_REPLAY_SKEW_SECS));
+        self.resume_replay_order.push_back(key);
+
+        while self.resume_replay.len() > MAX_RESUME_REPLAY_ENTRIES {
+            let Some(oldest) = self.resume_replay_order.pop_front() else {
+                break;
+            };
+            self.resume_replay.remove(&oldest);
+        }
+
+        true
+    }
+
+    /// Drops expired anti-replay tuples and keeps ordering state in sync.
+    fn sweep_resume_replay(&mut self, now_secs: u64) {
+        self.resume_replay
+            .retain(|_, expires_at| *expires_at >= now_secs);
+        self.resume_replay_order
+            .retain(|key| self.resume_replay.contains_key(key));
     }
 }
 
@@ -1024,6 +1082,7 @@ impl KyuReceiver {
         F: Fn(u64, KyuEvent),
     {
         let now = Instant::now();
+        let now_secs = unix_now_secs();
         let mut reclaimed_memory = 0u64;
 
         runtime.sessions.retain(|session_id, session| {
@@ -1042,6 +1101,7 @@ impl KyuReceiver {
             .total_decoder_memory_bytes
             .saturating_sub(reclaimed_memory);
         runtime.rate_limiter.sweep_idle(now);
+        runtime.sweep_resume_replay(now_secs);
 
         on_event(
             0,
@@ -1098,6 +1158,16 @@ impl KyuReceiver {
             KyuEvent::Metric {
                 name: "receiver.handshakes_rejected",
                 value: runtime.counters.handshakes_rejected,
+                session_id: None,
+                stream_id: None,
+                trace_id: None,
+            },
+        );
+        on_event(
+            0,
+            KyuEvent::Metric {
+                name: "receiver.resume_replay_rejected",
+                value: runtime.counters.resume_replay_rejected,
                 session_id: None,
                 stream_id: None,
                 trace_id: None,
@@ -1320,6 +1390,27 @@ impl KyuReceiver {
                 KyuEvent::Fault {
                     code: KyuErrorCode::HandshakeAuth,
                     message: "Rejected resume binder verification".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        }
+
+        if !runtime.register_resume_nonce(
+            validated_ticket.ticket_id,
+            resume.client_nonce,
+            validated_ticket.expires_at,
+            now_secs,
+        ) {
+            runtime.counters.handshakes_rejected += 1;
+            runtime.counters.resume_replay_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::HandshakeAuth,
+                    message: "Rejected replayed 0-RTT resume packet".to_string(),
                     session_id: Some(resume.session_id),
                     stream_id: None,
                     trace_id: None,
@@ -1770,13 +1861,14 @@ impl KyuReceiver {
 #[cfg(test)]
 mod tests {
     use super::{
-        KyuEvent, KyuReceiver, ReceiverRuntime, SOURCE_RATE_LIMIT_BURST, SourceRateLimiter,
-        parse_psk_hex,
+        KyuErrorCode, KyuEvent, KyuReceiver, ReceiverRuntime, SOURCE_RATE_LIMIT_BURST,
+        SOURCE_RATE_LIMIT_PACKETS_PER_SEC, SourceRateLimiter, TYPE_RESUME, parse_psk_hex,
     };
+    use crate::handshake::{ResumePacket, issue_session_ticket};
     use rand::RngExt;
     use std::fs;
     use std::net::SocketAddr;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1839,6 +1931,7 @@ mod tests {
 
             match packet[0] {
                 b'H' => receiver.handle_handshake_packet(&mut runtime, &packet, src, &|_, _| {}),
+                b'R' => receiver.handle_resume_packet(&mut runtime, &packet, src, &|_, _| {}),
                 b'D' => receiver.handle_data_packet(&mut runtime, &packet, src, &|_, _| {}),
                 b'P' => receiver.handle_ping_packet(&mut runtime, &packet, src),
                 _ => {}
@@ -1848,5 +1941,92 @@ mod tests {
         receiver.sweep_runtime(&mut runtime, &|_, event| {
             if let KyuEvent::Fault { .. } = event {}
         });
+    }
+
+    #[test]
+    fn replayed_resume_packet_is_rejected() {
+        let out_dir = temp_dir("resume-replay");
+        let psk = [0x42; 32];
+        let ticket_key = [0x24; 32];
+        let receiver = match KyuReceiver::new_with_psk_and_ticket_key(
+            "127.0.0.1:0",
+            &out_dir,
+            psk,
+            ticket_key,
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) if error.to_string().contains("Operation not permitted") => return,
+            Err(error) => panic!("receiver should be created: {error}"),
+        };
+
+        let ticket = issue_session_ticket(&ticket_key, 60).expect("ticket should be issued");
+        let resume = ResumePacket::new_client(0xDEAD_BEEF, &ticket);
+        let mut wire_packet = vec![TYPE_RESUME];
+        wire_packet
+            .extend(bincode::serialize(&resume).expect("resume packet should serialize for test"));
+
+        let src: SocketAddr = "127.0.0.1:34568".parse().expect("socket addr should parse");
+        let mut runtime = ReceiverRuntime::new();
+        let events = std::cell::RefCell::new(Vec::new());
+
+        receiver.handle_resume_packet(&mut runtime, &wire_packet, src, &|_, event| {
+            events.borrow_mut().push(event);
+        });
+        receiver.handle_resume_packet(&mut runtime, &wire_packet, src, &|_, event| {
+            events.borrow_mut().push(event);
+        });
+
+        assert_eq!(runtime.counters.handshakes_accepted, 1);
+        assert_eq!(runtime.counters.handshakes_rejected, 1);
+        assert_eq!(runtime.counters.resume_replay_rejected, 1);
+
+        let has_replay_fault = events.borrow().iter().any(|event| match event {
+            KyuEvent::Fault { code, message, .. } => {
+                *code == KyuErrorCode::HandshakeAuth && message.contains("replayed")
+            }
+            _ => false,
+        });
+        assert!(has_replay_fault, "expected replay rejection fault event");
+    }
+
+    #[test]
+    fn replay_nonce_entry_expires_and_can_be_reused() {
+        let mut runtime = ReceiverRuntime::new();
+        let ticket_id = [0xAA; 16];
+        let nonce = [0xBB; 24];
+        let now_secs = 1_000;
+
+        assert!(runtime.register_resume_nonce(ticket_id, nonce, now_secs + 1, now_secs));
+        assert!(!runtime.register_resume_nonce(ticket_id, nonce, now_secs + 1, now_secs));
+
+        let expiry_with_skew = now_secs + 1 + super::RESUME_REPLAY_SKEW_SECS;
+        assert!(runtime.register_resume_nonce(
+            ticket_id,
+            nonce,
+            now_secs + 10,
+            expiry_with_skew + 1
+        ));
+    }
+
+    #[test]
+    fn source_limiter_refills_after_elapsed_time() {
+        let mut limiter = SourceRateLimiter::default();
+        let source_ip: std::net::IpAddr = "127.0.0.1".parse().expect("ip should parse");
+        let now = Instant::now();
+
+        for _ in 0..(SOURCE_RATE_LIMIT_BURST as usize) {
+            assert!(limiter.allow(source_ip, now));
+        }
+        assert!(!limiter.allow(source_ip, now));
+
+        let refill_time = now + Duration::from_secs(1);
+        let expected_refill = SOURCE_RATE_LIMIT_PACKETS_PER_SEC as usize;
+        let mut refilled = 0usize;
+        for _ in 0..expected_refill {
+            if limiter.allow(source_ip, refill_time) {
+                refilled += 1;
+            }
+        }
+        assert!(refilled > 0);
     }
 }

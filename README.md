@@ -32,6 +32,7 @@ graph LR
 
 * **Multiplexing:** Send hundreds of files simultaneously over a single UDP port. Head-of-Line (HoL) blocking is mathematically eliminated.
 * **1-RTT + 0-RTT Handshakes:** New clients use PSK-authenticated X25519; recently authenticated clients can resume with encrypted tickets for 0-RTT startup.
+* **0-RTT Anti-Replay Guard:** Receivers reject duplicate ticket-id + client-nonce binder tuples until ticket expiry.
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
 * **Adversarial Resistance:** Packet sizes are static (1200B), and sequence numbers are encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
@@ -80,6 +81,7 @@ export KYU2_PSK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ```bash
 ./target/release/kyu2-cli recv --bind 0.0.0.0:8080 --out-dir ./downloads --psk $KYU2_PSK --ticket-key 8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677
 ```
+Persist `--ticket-key` in platform secure storage (for example, iOS Keychain) so restarted nodes can continue validating previously issued tickets.
 
 **Relay (Recover and regenerate fresh packets to the next hop):**
 ```bash
