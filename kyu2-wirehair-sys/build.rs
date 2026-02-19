@@ -25,12 +25,16 @@ fn main() {
         .flag("-O3")
         .flag_if_supported("-mavx2")
         .flag_if_supported("-mssse3")
-        // CRITICAL FIX: Look in the root directory (.)
-        // This allows <wirehair/wirehair.h> to resolve to ./wirehair/wirehair.h
         .include(".") 
-        .files(cpp_sources);
+        .files(cpp_sources)
+        .compile("wirehair");
 
-    build.compile("wirehair");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" || target_os == "ios" {
+        println!("cargo:rustc-link-lib=c++");
+    } else if target_os != "windows" {
+        println!("cargo:rustc-link-lib=stdc++");
+    }
 
     // 4. Generate Rust bindings
     // Get the absolute path to the header file
