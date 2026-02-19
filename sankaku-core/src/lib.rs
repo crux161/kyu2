@@ -1,5 +1,6 @@
 pub mod fec;
 pub mod handshake;
+pub mod hevc;
 pub mod metadata;
 pub mod openzl;
 pub mod pipeline;
@@ -13,6 +14,9 @@ pub use handshake::{
     KeyExchange, PROTOCOL_BASELINE_CAPS, PROTOCOL_CAP_RESUMPTION, PROTOCOL_VERSION, ResumePacket,
     SessionKeys, SessionTicket, ValidatedTicket, derive_resumption_session_keys,
     issue_session_ticket, validate_ticket_identity,
+};
+pub use hevc::{
+    AnnexBNalIter, SaoParameters, annex_b_nal_units, extract_sao_parameters, nal_unit_type,
 };
 pub use metadata::{SessionManifest, StreamSemantics};
 pub use pipeline::{
