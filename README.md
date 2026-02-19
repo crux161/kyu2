@@ -48,7 +48,7 @@ Ensure you have Rust and Cargo installed.
 cargo build --release -p kyu2-cli
 ```
 
-Set a shared PSK (same value on sender and receiver):
+Optional: set a shared PSK explicitly (recommended for non-local deployments):
 ```bash
 export KYU2_PSK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ```
@@ -57,11 +57,13 @@ export KYU2_PSK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ```bash
 ./target/release/kyu2-cli recv --bind 0.0.0.0:8080 --out-dir ./downloads
 ```
+When `--psk` and `KYU2_PSK` are absent, `recv` auto-generates ephemeral runtime bootstrap keys and registers bounded local aliases in a temp keyring.
 
 **Sender (Send a file):**
 ```bash
 ./target/release/kyu2-cli send my_video.mp4 --dest 127.0.0.1:8080
 ```
+When `--psk` and `KYU2_PSK` are absent, `send` attempts local keyring discovery for loopback/localhost targets.
 
 **Sender (Multiplex multiple files over one session):**
 ```bash
@@ -82,6 +84,9 @@ export KYU2_PSK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 ./target/release/kyu2-cli recv --bind 0.0.0.0:8080 --out-dir ./downloads --psk $KYU2_PSK --ticket-key 8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677
 ```
 Persist `--ticket-key` in platform secure storage (for example, iOS Keychain) so restarted nodes can continue validating previously issued tickets.
+
+**Security note on PSK rotation:**
+`KYU2_PSK` does not need constant churn. Use high-entropy keys, rotate on a policy cadence (for example 30-90 days), and rotate immediately on suspected compromise.
 
 **Relay (Recover and regenerate fresh packets to the next hop):**
 ```bash

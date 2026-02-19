@@ -493,6 +493,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kyu2-core",
+ "rand",
  "serde_json",
 ]
 
