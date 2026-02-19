@@ -24,7 +24,10 @@ pub struct WirehairEncoder {
 }
 
 impl WirehairEncoder {
+    /// Creates an encoder and ensures Wirehair global state is initialized first.
     pub fn new(message: &[u8], packet_size: u32) -> Result<Self, FecError> {
+        // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
+        crate::init();
         unsafe {
             let codec = wirehair_encoder_create(
                 ptr::null_mut(),
@@ -66,7 +69,7 @@ impl WirehairEncoder {
                 return Err(FecError::Internal(result as i32));
             }
         }
-        
+
         // Trim if the actual data written is smaller (usually only for the last packet)
         output.truncate(bytes_written as usize);
         Ok(output)
@@ -91,13 +94,12 @@ pub struct WirehairDecoder {
 }
 
 impl WirehairDecoder {
+    /// Creates a decoder and ensures Wirehair global state is initialized first.
     pub fn new(message_size: u64, packet_size: u32) -> Result<Self, FecError> {
+        // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
+        crate::init();
         unsafe {
-            let codec = wirehair_decoder_create(
-                ptr::null_mut(),
-                message_size,
-                packet_size,
-            );
+            let codec = wirehair_decoder_create(ptr::null_mut(), message_size, packet_size);
 
             if codec.is_null() {
                 return Err(FecError::InitFailed);
@@ -121,7 +123,7 @@ impl WirehairDecoder {
             );
 
             // Allow C-style enum names for this match block
-            #[allow(non_upper_case_globals)] 
+            #[allow(non_upper_case_globals)]
             match result {
                 WirehairResult_t_Wirehair_Success => Ok(true),
                 WirehairResult_t_Wirehair_NeedMore => Ok(false),
@@ -129,16 +131,13 @@ impl WirehairDecoder {
             }
         }
     }
-/// Reconstructs the full message once decode() returns true.
+    /// Reconstructs the full message once decode() returns true.
     pub fn recover(&self) -> Result<Vec<u8>, FecError> {
         let mut output = vec![0u8; self.message_size as usize];
 
         unsafe {
-            let result = wirehair_recover(
-                self.inner,
-                output.as_mut_ptr() as *mut _,
-                self.message_size,
-            );
+            let result =
+                wirehair_recover(self.inner, output.as_mut_ptr() as *mut _, self.message_size);
 
             if result != WirehairResult_t_Wirehair_Success {
                 return Err(FecError::RecoveryFailed);
