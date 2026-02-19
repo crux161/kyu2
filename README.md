@@ -17,14 +17,14 @@ graph LR
     B -->|ChaCha20-Poly1305| C(Encrypted Blob)
     C -->|Wirehair FEC| D{Droplets}
     D -->|QUIC-Style XOR Mask| E(Obfuscated Header)
-    E -->|1400B Padding| F[UDP Blast]
+    E -->|1200B Padding| F[UDP Blast]
 ```
 
 1.  **Compression (Squeeze):** Data is compressed using Zstandard (tANS).
 2.  **Encryption (Seal):** Authenticated encryption via ChaCha20-Poly1305 using an X25519 ephemeral shared secret.
 3.  **Forward Error Correction (Spray):** Data is encoded using **Wirehair** (O(N) Fountain Code), allowing recovery from any subset of packets.
 4.  **Header Protection (Mask):** The packet geometry is XOR-masked using a dynamic nonce derived from the encrypted payload, preventing stream tracking.
-5.  **Traffic Obfuscation:** Every network packet is padded to exactly 1400 bytes. An observer cannot distinguish between file transfers, handshakes, or silence.
+5.  **Traffic Obfuscation:** Every network packet is padded to exactly 1200 bytes. An observer cannot distinguish between file transfers, handshakes, or silence.
 
 ---
 
