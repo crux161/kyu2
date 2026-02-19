@@ -1,5 +1,5 @@
 [package]
-name = "kyu2-fuzz"
+name = "sankaku-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-kyu2-core = { path = "../kyu2-core" }
+sankaku-core = { path = "../sankaku-core" }
 
 [[bin]]
 name = "session_inputs"

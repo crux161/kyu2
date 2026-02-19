@@ -14,8 +14,8 @@ Current implementation status:
 
 1. Redesign nonce/key schedule for authenticated encryption.
 Current risk:
-- Nonce is derived only from `block_id` (`kyu2-core/src/pipeline.rs:42`, `kyu2-core/src/pipeline.rs:80`).
-- Session key is reused across multiple file sends in the same sender session (`kyu2-core/src/session.rs:106`, `kyu2-core/src/session.rs:124`).
+- Nonce is derived only from `block_id` (`sankaku-core/src/pipeline.rs:42`, `sankaku-core/src/pipeline.rs:80`).
+- Session key is reused across multiple file sends in the same sender session (`sankaku-core/src/session.rs:106`, `sankaku-core/src/session.rs:124`).
 Minimum done:
 - Derive protocol keys from shared secret with HKDF and transcript binding.
 - Separate keys by purpose and direction (payload tx/rx, header tx/rx).
@@ -24,7 +24,7 @@ Minimum done:
 
 2. Add authenticated handshake and peer identity checks.
 Current risk:
-- Handshake uses ephemeral DH only; no authenticated peer identity (`kyu2-core/src/handshake.rs:7`, `kyu2-core/src/session.rs:289`).
+- Handshake uses ephemeral DH only; no authenticated peer identity (`sankaku-core/src/handshake.rs:7`, `sankaku-core/src/session.rs:289`).
 - Active MITM can proxy key exchange.
 Minimum done:
 - Add peer authentication model (PSK, static keys, certificates, or Noise pattern with identity binding).
@@ -33,8 +33,8 @@ Minimum done:
 
 3. Bound all untrusted packet-driven allocations and state growth.
 Current risk:
-- `total_size` and `pkt_size` are parsed from network headers and flow into decoder creation/recovery (`kyu2-core/src/session.rs:336`, `kyu2-core/src/session.rs:350`, `kyu2-core/src/fec.rs:134`).
-- Session map grows without explicit hard cap (`kyu2-core/src/session.rs:268`, `kyu2-core/src/session.rs:300`).
+- `total_size` and `pkt_size` are parsed from network headers and flow into decoder creation/recovery (`sankaku-core/src/session.rs:336`, `sankaku-core/src/session.rs:350`, `sankaku-core/src/fec.rs:134`).
+- Session map grows without explicit hard cap (`sankaku-core/src/session.rs:268`, `sankaku-core/src/session.rs:300`).
 Minimum done:
 - Enforce strict protocol limits for packet size and protected block size.
 - Reject invalid or suspicious headers before decoder allocation.
@@ -43,7 +43,7 @@ Minimum done:
 
 4. Remove panic paths from runtime network/file handling.
 Current risk:
-- Runtime `unwrap()` use can crash process on malformed or unexpected data paths (`kyu2-core/src/session.rs:100`, `kyu2-core/src/session.rs:362`, `kyu2-core/src/metadata.rs:23`).
+- Runtime `unwrap()` use can crash process on malformed or unexpected data paths (`sankaku-core/src/session.rs:100`, `sankaku-core/src/session.rs:362`, `sankaku-core/src/metadata.rs:23`).
 Minimum done:
 - Replace runtime `unwrap()`/`expect()` in protocol and IO paths with typed errors.
 - Ensure malformed inputs produce structured error events, not panics.
@@ -51,8 +51,8 @@ Minimum done:
 
 5. Make wire spec and implementation consistent and enforce version checks.
 Current risk:
-- Packet size conflicts between docs and code (`SPEC.md:17`, `README.md:27`, `kyu2-core/src/session.rs:14`).
-- `protocol_version` is carried but not validated/rejected for incompatibility (`kyu2-core/src/handshake.rs:8`, `kyu2-core/src/session.rs:289`).
+- Packet size conflicts between docs and code (`SPEC.md:17`, `README.md:27`, `sankaku-core/src/session.rs:14`).
+- `protocol_version` is carried but not validated/rejected for incompatibility (`sankaku-core/src/handshake.rs:8`, `sankaku-core/src/session.rs:289`).
 Minimum done:
 - Use shared constants for protocol geometry and publish one canonical spec.
 - Reject unsupported protocol versions during handshake.
@@ -60,7 +60,7 @@ Minimum done:
 
 6. Expand security/reliability tests beyond happy path.
 Current risk:
-- Test coverage is minimal and mostly happy-path (`kyu2-core/tests/integration_test.rs:4`, `kyu2-wirehair-sys/src/lib.rs:11`).
+- Test coverage is minimal and mostly happy-path (`sankaku-core/tests/integration_test.rs:4`, `sankaku-wirehair-sys/src/lib.rs:11`).
 Minimum done:
 - Add integration tests with loss, reorder, duplication, corruption, and forged packets.
 - Add parser fuzzing for packet/header decode paths.
@@ -68,7 +68,7 @@ Minimum done:
 
 7. Make library initialization safe-by-default.
 Current risk:
-- Correct operation depends on caller remembering to call `init()` (`kyu2-core/src/lib.rs:15`).
+- Correct operation depends on caller remembering to call `init()` (`sankaku-core/src/lib.rs:15`).
 Minimum done:
 - Use `OnceLock`/`Once` so Wirehair init happens automatically on first use.
 - Keep explicit init as optional no-op convenience, not a safety requirement.
@@ -85,7 +85,7 @@ Minimum done:
 
 1. Align product claims with real capabilities.
 Why:
-- README claims high-concurrency multiplexing and mesh behavior not yet fully represented in the exposed workflow (`README.md:33`, `kyu2-cli/src/main.rs:42`).
+- README claims high-concurrency multiplexing and mesh behavior not yet fully represented in the exposed workflow (`README.md:33`, `sankaku-cli/src/main.rs:42`).
 Implement:
 - Either ship the missing capabilities or narrow claims to current behavior.
 
@@ -103,7 +103,7 @@ Implement:
 
 4. Improve build/release reproducibility.
 Why:
-- Current workspace has dependency/version drift and hygiene issues (`Cargo.toml:12`, `Cargo.toml:15`, `.gitignore:5`, `kyu2-core/Cargo.toml:17`, `kyu2-cli/Cargo.toml:11`).
+- Current workspace has dependency/version drift and hygiene issues (`Cargo.toml:12`, `Cargo.toml:15`, `.gitignore:5`, `sankaku-core/Cargo.toml:17`, `sankaku-cli/Cargo.toml:11`).
 Implement:
 - Remove duplicate workspace members.
 - Standardize dependency major versions where feasible.

@@ -1,4 +1,4 @@
-use kyu2_wirehair_sys::*;
+use sankaku_wirehair_sys::*;
 use std::ptr;
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub struct WirehairEncoder {
 impl WirehairEncoder {
     /// Creates an encoder and ensures Wirehair global state is initialized first.
     pub fn new(message: &[u8], packet_size: u32) -> Result<Self, FecError> {
-        // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
+        // Auto-init makes the FFI safe-by-default for callers that forget `sankaku_core::init()`.
         crate::init();
         if message.is_empty() || message.len() > MAX_WIREHAIR_MESSAGE_BYTES {
             return Err(FecError::MessageSizeOutOfBounds);
@@ -114,7 +114,7 @@ pub struct WirehairDecoder {
 impl WirehairDecoder {
     /// Creates a decoder and ensures Wirehair global state is initialized first.
     pub fn new(message_size: u64, packet_size: u32) -> Result<Self, FecError> {
-        // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
+        // Auto-init makes the FFI safe-by-default for callers that forget `sankaku_core::init()`.
         crate::init();
         if message_size == 0 || message_size as usize > MAX_WIREHAIR_MESSAGE_BYTES {
             return Err(FecError::MessageSizeOutOfBounds);

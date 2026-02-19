@@ -387,13 +387,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "kyu2-core"
+name = "sankaku-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "chacha20poly1305",
- "kyu2-wirehair-sys",
+ "sankaku-wirehair-sys",
  "rand",
  "rand_core 0.6.4",
  "serde",
@@ -403,15 +403,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "kyu2-fuzz"
+name = "sankaku-fuzz"
 version = "0.0.0"
 dependencies = [
- "kyu2-core",
+ "sankaku-core",
  "libfuzzer-sys",
 ]
 
 [[package]]
-name = "kyu2-wirehair-sys"
+name = "sankaku-wirehair-sys"
 version = "0.1.0"
 dependencies = [
  "bindgen",

@@ -1,63 +1,73 @@
-# Kyu2 Wire Format (v2.0)
+# Sankaku Wire Format (v3)
 
-The protocol is designed to be **stateless**, **multiplexed**, and **adversarially resistant**.
+Sankaku is a frame-native, UDP/FEC transport for realtime video payloads.
 
-## 1. Handshake Phase (Type `H`)
-Initiates the X25519 Diffie-Hellman key exchange.
+## 1. Session Handshake
 
-| Offset | Size | Field | Description |
+Sankaku keeps the authenticated X25519 + ChaCha20-Poly1305 key schedule and 0-RTT ticket model.
+
+- `H` (`0x48`): full 1-RTT handshake packet (`HandshakePacket` bincode blob)
+- `R` (`0x52`): 0-RTT resume packet (`ResumePacket` bincode blob)
+- `P` / `O`: ping/pong liveness
+
+## 2. Data Packet (`D`)
+
+Unlike the previous fixed 1200-byte format, Sankaku packets are variable-sized.
+Optional padding still exists, but no fixed-size enforcement is required.
+
+| Offset | Size | Field | Notes |
 | :--- | :--- | :--- | :--- |
-| **0** | `1` | **Type** | `0x48` (b'H') |
-| **1** | `VLP` | **Bincode Blob** | Contains `ProtocolVersion` (u16), `Capabilities` (u16), `SessionID` (u64), `PublicKey` (32 bytes), and `AuthTag` (16 bytes). |
+| 0 | 1 | Type | `0x44` (`D`) |
+| 1 | 8 | Session ID | Plaintext lookup key |
+| 9 | 23 | Masked Geometry Header | XOR-masked with header key stream |
+| 32 | `PktSize` | Wirehair droplet bytes | Actual encoded droplet |
+| var | optional | Padding | Optional policy-driven padding |
 
----
+## 3. Masked Geometry Header (23 bytes)
 
-## 2. Data Stream Phase (Type `D`)
+`block_id` is now the monotonic frame index.
 
-Every data packet is padded to exactly **1200 bytes** to prevent traffic analysis. The payload size is hidden within the encrypted header.
+| Offset | Type | Field |
+| :--- | :--- | :--- |
+| 0 | `u32` | Stream ID |
+| 4 | `u64` | Frame Index (`block_id`) |
+| 12 | `u32` | FEC Sequence ID |
+| 16 | `u32` | Protected Size |
+| 20 | `u16` | Packet Size |
+| 22 | `u8` | Data Kind Flag (`0` = NAL, `1` = SAO) |
 
+Header masking uses ChaCha20-derived keystream from the first payload bytes and the negotiated header key.
 
+## 4. Frame Payload Pipeline
 
-### Packet Layout
-| Offset | Size | Field | Description |
-| :--- | :--- | :--- | :--- |
-| **0** | `1` | **Type** | `0x44` (b'D') |
-| **1** | `8` | **Session ID** | Plaintext. Used by receiver to look up the X25519 Shared Secret. |
-| **9** | `22` | **Masked Header** | The XOR-obfuscated geometry. |
-| **31** | `VLP`| **Payload** | The raw Wirehair droplet data (up to `Pkt Size`). |
-| **Varies**| `VLP`| **Padding** | Zeros appended to reach exactly 1200 bytes. |
+Per frame:
 
----
+1. Serialize frame envelope (`timestamp_us`, `keyframe`, raw payload bytes).
+2. If kind is SAO and compression enabled, apply OpenZL.
+3. Wrap with pipeline envelope mode byte:
+   - raw NAL
+   - raw SAO
+   - OpenZL-compressed SAO
+4. Encrypt with ChaCha20-Poly1305 using `(stream_id, frame_index)` bound nonce/AAD.
+5. Apply Wirehair FEC and emit droplets.
 
-### 3. The Masked Header (22 Bytes)
-To prevent stream tracking and replay analysis, the 22-byte geometry header is XOR-masked before transmission.
+Receiver reverses this path and emits fully recovered frames in-memory.
 
-**Plaintext Geometry:**
-| Offset | Type | Field | Description |
-| :--- | :--- | :--- | :--- |
-| **0** | `u32` | **Stream ID** | Multiplexing ID for the specific file. |
-| **4** | `u64` | **Block ID** | Chunk index. Block 0 is the `SessionManifest`. |
-| **12** | `u32` | **Seq ID** | FEC droplet index. |
-| **16** | `u32` | **Total Size** | Total bytes of the encrypted blob for this Block. |
-| **20** | `u16` | **Pkt Size** | Size of the valid Payload in this UDP packet. |
+## 5. Control / Adaptation
 
-**Masking Algorithm:**
-1. Extract the first 12 bytes of the Payload. This is the **Dynamic Nonce**.
-2. Initialize ChaCha20 with the `SharedSecret` and the `Dynamic Nonce`.
-3. Encrypt a 22-byte array of zeros `[0u8; 22]` to generate the **Keystream Mask**.
-4. Apply a bitwise XOR between the Plaintext Geometry and the Keystream Mask.
+- `F` (`0x46`): FEC feedback (`ideal_packets`, `used_packets`)
+- `T` (`0x54`): telemetry (`packet_loss_ppm`, `jitter_us`)
+- `E` (`0x45`): stream-finish marker (final bytes/frames)
+- `A` (`0x41`): stream ACK
 
-Because the payload is previously encrypted via ChaCha20-Poly1305 (using `BlockID` as AAD), the first 12 bytes are statistically random and guaranteed to change for every FEC droplet, ensuring the Keystream Mask is highly dynamic.
+Sender uses `F` and `T` to tune redundancy dynamically (`~1.1x` up to bounded max) and to adjust pacing for jitter-heavy paths.
 
----
+## 6. Async API Surface
 
-## 4. Stream Manifest (`BlockID = 0`)
+`SankakuStream` exposes async send/receive of `VideoFrame`:
 
-Each stream starts with a serialized `SessionManifest` block. Current fields:
+- outbound: `send(VideoFrame)` (frame index mapped monotonically on wire)
+- inbound: `recv() -> InboundVideoFrame` via in-memory channel
+- ticket continuity: import/export session ticket blobs to preserve 0-RTT resumes
 
-- `filename: String`
-- `file_size: u64`
-- `trace_id: u64`
-- `timestamp: u64`
-
-`trace_id` is propagated through sender/receiver events to support observability and relay tracing.
+No filesystem-based payload path is required for transport operation.

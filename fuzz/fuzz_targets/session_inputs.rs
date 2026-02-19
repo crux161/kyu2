@@ -1,6 +1,6 @@
 #![no_main]
 
-use kyu2_core::{SessionManifest, parse_psk_hex, validate_ticket_identity};
+use sankaku_core::{SessionManifest, parse_psk_hex, validate_ticket_identity};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

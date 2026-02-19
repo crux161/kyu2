@@ -14,9 +14,9 @@ pub const PROTOCOL_VERSION: u16 = 2;
 pub const PROTOCOL_BASELINE_CAPS: u16 = 0x0001;
 /// Capability bit signaling support for ticket-based session resumption.
 pub const PROTOCOL_CAP_RESUMPTION: u16 = 0x0002;
-const HANDSHAKE_DOMAIN: &[u8] = b"kyu2/handshake/v2";
-const TICKET_DOMAIN: &[u8] = b"kyu2/ticket/v1";
-const RESUME_DOMAIN: &[u8] = b"kyu2/resume/v1";
+const HANDSHAKE_DOMAIN: &[u8] = b"sankaku/handshake/v2";
+const TICKET_DOMAIN: &[u8] = b"sankaku/ticket/v1";
+const RESUME_DOMAIN: &[u8] = b"sankaku/resume/v1";
 
 const TAG_SIZE: usize = 16;
 const TAG_LABEL_CLIENT: u8 = 0x43; // 'C'
