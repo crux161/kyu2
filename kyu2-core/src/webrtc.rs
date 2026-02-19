@@ -232,7 +232,7 @@ impl WebRtcPeer {
                     return;
                 };
 
-                let Ok(candidate_init) = candidate.to_json().await else {
+                let Ok(candidate_init) = candidate.to_json() else {
                     return;
                 };
                 let Ok(raw) = serde_json::to_string(&candidate_init) else {
