@@ -25,7 +25,7 @@ fn main() {
         .flag("-O3")
         .flag_if_supported("-mavx2")
         .flag_if_supported("-mssse3")
-        .include(".") 
+        .include(".")
         .files(cpp_sources)
         .compile("wirehair");
 
@@ -49,7 +49,7 @@ fn main() {
     let bindings = bindgen::Builder::default()
         .header(header_path.to_str().expect("Path is not valid UTF-8"))
         // Tell clang to look in the root dir too, just in case the header has imports
-        .clang_arg(format!("-I{}", root_dir)) 
+        .clang_arg(format!("-I{}", root_dir))
         .allowlist_function("wirehair_.*")
         .allowlist_type("Wirehair.*")
         .allowlist_var("Wirehair.*")

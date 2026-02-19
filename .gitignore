@@ -2,4 +2,3 @@
 /target
 /journal
 **/*.rs.bk
-Cargo.lock

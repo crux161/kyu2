@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify lockfile
+        run: cargo generate-lockfile --locked
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  adversarial-suite:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Parser and Network Adversarial Suite
+        run: cargo test -p kyu2-core --test network_resilience_test -- --nocapture
+
+  asan-adversarial:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    continue-on-error: true
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Install Nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: AddressSanitizer Adversarial Suite
+        run: |
+          export RUSTFLAGS="-Zsanitizer=address"
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p kyu2-core --test network_resilience_test -- --nocapture

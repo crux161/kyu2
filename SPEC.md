@@ -8,13 +8,13 @@ Initiates the X25519 Diffie-Hellman key exchange.
 | Offset | Size | Field | Description |
 | :--- | :--- | :--- | :--- |
 | **0** | `1` | **Type** | `0x48` (b'H') |
-| **1** | `VLP` | **Bincode Blob** | Contains `ProtocolVersion` (u16), `SessionID` (u64), and `PublicKey` (32 bytes). |
+| **1** | `VLP` | **Bincode Blob** | Contains `ProtocolVersion` (u16), `Capabilities` (u16), `SessionID` (u64), `PublicKey` (32 bytes), and `AuthTag` (16 bytes). |
 
 ---
 
 ## 2. Data Stream Phase (Type `D`)
 
-Every data packet is padded to exactly **1400 bytes** to prevent traffic analysis. The payload size is hidden within the encrypted header. 
+Every data packet is padded to exactly **1200 bytes** to prevent traffic analysis. The payload size is hidden within the encrypted header.
 
 
 
@@ -25,7 +25,7 @@ Every data packet is padded to exactly **1400 bytes** to prevent traffic analysi
 | **1** | `8` | **Session ID** | Plaintext. Used by receiver to look up the X25519 Shared Secret. |
 | **9** | `22` | **Masked Header** | The XOR-obfuscated geometry. |
 | **31** | `VLP`| **Payload** | The raw Wirehair droplet data (up to `Pkt Size`). |
-| **Varies**| `VLP`| **Padding** | Zeros appended to reach exactly 1400 bytes. |
+| **Varies**| `VLP`| **Padding** | Zeros appended to reach exactly 1200 bytes. |
 
 ---
 
@@ -48,3 +48,16 @@ To prevent stream tracking and replay analysis, the 22-byte geometry header is X
 4. Apply a bitwise XOR between the Plaintext Geometry and the Keystream Mask.
 
 Because the payload is previously encrypted via ChaCha20-Poly1305 (using `BlockID` as AAD), the first 12 bytes are statistically random and guaranteed to change for every FEC droplet, ensuring the Keystream Mask is highly dynamic.
+
+---
+
+## 4. Stream Manifest (`BlockID = 0`)
+
+Each stream starts with a serialized `SessionManifest` block. Current fields:
+
+- `filename: String`
+- `file_size: u64`
+- `trace_id: u64`
+- `timestamp: u64`
+
+`trace_id` is propagated through sender/receiver events to support observability and relay tracing.
