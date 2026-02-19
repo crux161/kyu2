@@ -1,4 +1,7 @@
 /data
 /target
 /journal
+/fuzz/artifacts
+/fuzz/corpus
+/fuzz/target
 **/*.rs.bk

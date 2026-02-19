@@ -2,6 +2,9 @@ use kyu2_wirehair_sys::*;
 use std::ptr;
 use thiserror::Error;
 
+const MAX_WIREHAIR_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WIREHAIR_PACKET_BYTES: u32 = 1500;
+
 #[derive(Error, Debug)]
 pub enum FecError {
     #[error("Wirehair initialization failed")]
@@ -12,6 +15,10 @@ pub enum FecError {
     RecoveryFailed,
     #[error("Need more data to recover")]
     NeedMoreData,
+    #[error("Packet size out of bounds")]
+    PacketSizeOutOfBounds,
+    #[error("Message size out of bounds")]
+    MessageSizeOutOfBounds,
     #[error("Internal Wirehair error: {0}")]
     Internal(i32),
 }
@@ -28,6 +35,13 @@ impl WirehairEncoder {
     pub fn new(message: &[u8], packet_size: u32) -> Result<Self, FecError> {
         // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
         crate::init();
+        if message.is_empty() || message.len() > MAX_WIREHAIR_MESSAGE_BYTES {
+            return Err(FecError::MessageSizeOutOfBounds);
+        }
+        if packet_size == 0 || packet_size > MAX_WIREHAIR_PACKET_BYTES {
+            return Err(FecError::PacketSizeOutOfBounds);
+        }
+
         unsafe {
             let codec = wirehair_encoder_create(
                 ptr::null_mut(),
@@ -70,6 +84,10 @@ impl WirehairEncoder {
             }
         }
 
+        if bytes_written > self.packet_size {
+            return Err(FecError::Internal(-1));
+        }
+
         // Trim if the actual data written is smaller (usually only for the last packet)
         output.truncate(bytes_written as usize);
         Ok(output)
@@ -98,6 +116,13 @@ impl WirehairDecoder {
     pub fn new(message_size: u64, packet_size: u32) -> Result<Self, FecError> {
         // Auto-init makes the FFI safe-by-default for callers that forget `kyu2_core::init()`.
         crate::init();
+        if message_size == 0 || message_size as usize > MAX_WIREHAIR_MESSAGE_BYTES {
+            return Err(FecError::MessageSizeOutOfBounds);
+        }
+        if packet_size == 0 || packet_size > MAX_WIREHAIR_PACKET_BYTES {
+            return Err(FecError::PacketSizeOutOfBounds);
+        }
+
         unsafe {
             let codec = wirehair_decoder_create(ptr::null_mut(), message_size, packet_size);
 
@@ -114,6 +139,10 @@ impl WirehairDecoder {
     }
 
     pub fn decode(&mut self, block_id: u32, data: &[u8]) -> Result<bool, FecError> {
+        if data.is_empty() || data.len() as u32 > self._packet_size {
+            return Err(FecError::PacketSizeOutOfBounds);
+        }
+
         unsafe {
             let result = wirehair_decode(
                 self.inner,

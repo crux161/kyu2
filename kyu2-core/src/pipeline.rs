@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
@@ -8,9 +8,35 @@ use chacha20poly1305::{
 /// 0 = Fastest (Realtime), 22 = Smallest (Archival).
 /// For streaming, 1-3 is usually the sweet spot.
 const COMPRESSION_LEVEL: i32 = 1;
+const ENVELOPE_RAW: u8 = 0;
+const ENVELOPE_ZSTD: u8 = 1;
+
+/// Compression mode for protected blocks.
+#[derive(Debug, Clone, Copy)]
+pub enum CompressionMode {
+    Disabled,
+    Zstd { level: i32 },
+}
+
+/// Pipeline behavior toggles selected by the embedding transport.
+#[derive(Debug, Clone, Copy)]
+pub struct PipelineConfig {
+    pub compression: CompressionMode,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            compression: CompressionMode::Zstd {
+                level: COMPRESSION_LEVEL,
+            },
+        }
+    }
+}
 
 pub struct KyuPipeline {
     cipher: ChaCha20Poly1305,
+    config: PipelineConfig,
     // We keep a reusable buffer for compression to reduce memory allocation churn
     // (Note: Currently unused in the simple implementation below, but good practice for future optimization)
     #[allow(dead_code)]
@@ -20,11 +46,17 @@ pub struct KyuPipeline {
 impl KyuPipeline {
     /// Initialize with a 32-byte secret key.
     pub fn new(key_bytes: &[u8; 32]) -> Self {
+        Self::new_with_config(key_bytes, PipelineConfig::default())
+    }
+
+    /// Initialize with a 32-byte key and explicit pipeline config.
+    pub fn new_with_config(key_bytes: &[u8; 32], config: PipelineConfig) -> Self {
         let key = Key::from_slice(key_bytes);
         let cipher = ChaCha20Poly1305::new(key);
 
         Self {
             cipher,
+            config,
             compression_buffer: Vec::with_capacity(1024 * 64), // Pre-allocate 64KB
         }
     }
@@ -38,10 +70,20 @@ impl KyuPipeline {
         stream_id: u32,
         block_id: u64,
     ) -> Result<Vec<u8>> {
-        // 1. Compress (tANS)
-        // We use the 'bulk' API here for simplicity.
-        let compressed_data =
-            zstd::encode_all(raw_data, COMPRESSION_LEVEL).context("Compression failed")?;
+        // 1. Compress (optional), then envelope for decode-time mode selection.
+        let mut plaintext = Vec::with_capacity(raw_data.len().saturating_add(64));
+        match self.config.compression {
+            CompressionMode::Disabled => {
+                plaintext.push(ENVELOPE_RAW);
+                plaintext.extend_from_slice(raw_data);
+            }
+            CompressionMode::Zstd { level } => {
+                let compressed_data =
+                    zstd::encode_all(raw_data, level).context("Compression failed")?;
+                plaintext.push(ENVELOPE_ZSTD);
+                plaintext.extend_from_slice(&compressed_data);
+            }
+        }
 
         // 2. Encrypt (ChaCha20-Poly1305)
         let nonce = Self::generate_nonce(stream_id, block_id);
@@ -49,7 +91,7 @@ impl KyuPipeline {
 
         // Poly1305 requires AAD. We bind both stream and block identity.
         let payload = Payload {
-            msg: &compressed_data,
+            msg: &plaintext,
             aad: &aad,
         };
 
@@ -83,8 +125,16 @@ impl KyuPipeline {
             .decrypt(&nonce, payload)
             .map_err(|_| anyhow::anyhow!("Decryption failed (Auth Tag Mismatch)"))?;
 
-        // 2. Decompress
-        let raw_data = zstd::decode_all(&compressed_data[..]).context("Decompression failed")?;
+        let Some((&mode, body)) = compressed_data.split_first() else {
+            bail!("Decryption produced empty block");
+        };
+
+        // 2. Decode envelope payload.
+        let raw_data = match mode {
+            ENVELOPE_RAW => body.to_vec(),
+            ENVELOPE_ZSTD => zstd::decode_all(body).context("Decompression failed")?,
+            _ => bail!("Unsupported pipeline envelope mode"),
+        };
 
         Ok(raw_data)
     }
@@ -110,7 +160,7 @@ impl KyuPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::KyuPipeline;
+    use super::{CompressionMode, KyuPipeline, PipelineConfig};
 
     #[test]
     fn stream_id_is_bound_to_authentication() {
@@ -145,5 +195,23 @@ mod tests {
             .protect_block(data, 2, block_id)
             .expect("encryption should succeed");
         assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn compression_can_be_disabled_for_media_paths() {
+        let key = [0x55; 32];
+        let config = PipelineConfig {
+            compression: CompressionMode::Disabled,
+        };
+        let mut pipeline = KyuPipeline::new_with_config(&key, config);
+
+        let raw = b"\x11\x22\x33\x44\x55";
+        let protected = pipeline
+            .protect_block(raw, 1, 1)
+            .expect("protection should succeed");
+        let restored = pipeline
+            .restore_block(&protected, 1, 1)
+            .expect("restore should succeed");
+        assert_eq!(restored, raw);
     }
 }

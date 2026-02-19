@@ -24,7 +24,7 @@ graph LR
 2.  **Encryption (Seal):** Authenticated encryption via ChaCha20-Poly1305 using X25519-derived directional session keys.
 3.  **Forward Error Correction (Spray):** Data is encoded using **Wirehair** (O(N) Fountain Code), allowing recovery from any subset of packets.
 4.  **Header Protection (Mask):** The packet geometry is XOR-masked using a dynamic nonce derived from the encrypted payload, preventing stream tracking.
-5.  **Traffic Obfuscation:** Every network packet is padded to exactly 1200 bytes. An observer cannot distinguish between file transfers, handshakes, or silence.
+5.  **Traffic Shaping:** Packet padding is configurable (`fixed`, `disabled`, `adaptive`) so deployments can tune obfuscation vs bandwidth efficiency.
 
 ---
 
@@ -34,8 +34,12 @@ graph LR
 * **1-RTT + 0-RTT Handshakes:** New clients use PSK-authenticated X25519; recently authenticated clients can resume with encrypted tickets for 0-RTT startup.
 * **0-RTT Anti-Replay Guard:** Receivers reject duplicate ticket-id + client-nonce binder tuples until ticket expiry.
 * **Bounded Known-Client Cache:** Receiver tracks authenticated client IDs in a pruned, capped in-memory map (no unbounded growth).
+* **Frame-Native Streaming APIs:** `kyu2-core` now supports trait-based frame sources/sinks (reader/channel adapters included) instead of filesystem-only paths.
+* **Adaptive FEC Control:** Receivers emit decode-efficiency feedback and senders dynamically tune redundancy in flight.
+* **Relay Route Fallbacks:** Senders can try trusted relay routes when direct handshakes fail.
+* **Pluggable Handshake Engine:** Handshake logic is abstracted behind a trait so standardized engines can replace the default implementation.
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
-* **Adversarial Resistance:** Packet sizes are static (1200B), and sequence numbers are encrypted.
+* **Adversarial Resistance:** Header geometry and sequence mapping remain authenticated and encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
 * **Operational Telemetry:** Structured faults, metrics, and trace IDs are emitted for stream/session visibility.
 
@@ -71,6 +75,13 @@ When `--psk` and `KYU2_PSK` are absent, `send` attempts local keyring discovery 
 ./target/release/kyu2-cli send movie.mp4 archive.tar logs.zip --dest 127.0.0.1:8080 --redundancy 1.5
 ```
 
+**Sender with adaptive FEC + adaptive padding + relay route fallback:**
+```bash
+./target/release/kyu2-cli send call.h264 --dest 203.0.113.10:5000 \
+  --fec adaptive --padding adaptive --padding-min 256 --padding-max 1180 \
+  --relay 198.51.100.20:8081 --relay 198.51.100.21:8081
+```
+
 **Sender ticket persistence (for 0-RTT resumption across process restarts):**
 ```bash
 # First run stores a fresh ticket
@@ -94,6 +105,9 @@ Persist `--ticket-key` in platform secure storage (for example, iOS Keychain) so
 ./target/release/kyu2-cli relay --bind 0.0.0.0:8081 --forward 10.0.0.2:8080 --spool-dir ./relay_spool
 ```
 
+**Library frame-mode integration (non-filesystem I/O):**
+Use `FrameSource`/`FrameSink` with `KyuSender::send_stream_from_source(...)` and `KyuReceiver::run_loop_frames(...)` for channel-driven media pipelines.
+
 **Structured JSON output (for dashboards/log pipelines):**
 ```bash
 ./target/release/kyu2-cli --json recv --bind 0.0.0.0:8080 --out-dir ./downloads
@@ -111,6 +125,7 @@ Persist `--ticket-key` in platform secure storage (for example, iOS Keychain) so
 
 * `PROTOCOL_EVOLUTION.md`: Compatibility, versioning, and deprecation policy.
 * `BUILD_REPRODUCIBILITY.md`: Lockfile, CI gates, and reproducibility rules.
+* CI includes adversarial tests, AddressSanitizer runs, and a fuzz-smoke job for parser/FFI input hardening.
 
 ## 📜 License
 

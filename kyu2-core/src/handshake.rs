@@ -688,6 +688,170 @@ impl Default for KeyExchange {
     }
 }
 
+/// Swappable handshake implementation boundary.
+///
+/// Default deployments use `DefaultHandshakeEngine`, while standardized
+/// alternatives (for example DTLS-backed engines) can implement this trait.
+pub trait HandshakeEngine: Send + Sync {
+    fn build_client_hello(
+        &self,
+        session_id: u64,
+        client_public: [u8; 32],
+        psk: &[u8; 32],
+    ) -> HandshakePacket;
+
+    fn verify_client_hello(&self, packet: &HandshakePacket, psk: &[u8; 32]) -> bool;
+
+    fn build_server_hello(
+        &self,
+        session_id: u64,
+        server_public: [u8; 32],
+        client_public: [u8; 32],
+        psk: &[u8; 32],
+        session_ticket: Option<SessionTicket>,
+    ) -> HandshakePacket;
+
+    fn verify_server_hello(
+        &self,
+        packet: &HandshakePacket,
+        psk: &[u8; 32],
+        client_public: [u8; 32],
+    ) -> bool;
+
+    fn derive_session_keys(
+        &self,
+        shared_secret: [u8; 32],
+        psk: &[u8; 32],
+        role: HandshakeRole,
+        context: &HandshakeContext,
+    ) -> Result<SessionKeys>;
+
+    fn build_resume_packet(&self, session_id: u64, ticket: &SessionTicket) -> ResumePacket;
+
+    fn verify_resume_packet(
+        &self,
+        packet: &ResumePacket,
+        resumption_secret: &[u8; 32],
+        now_secs: u64,
+    ) -> bool;
+
+    fn derive_resumption_session_keys(
+        &self,
+        resumption_secret: [u8; 32],
+        role: HandshakeRole,
+        session_id: u64,
+        client_nonce: [u8; 24],
+    ) -> Result<SessionKeys>;
+
+    fn issue_session_ticket(
+        &self,
+        ticket_key: &[u8; 32],
+        lifetime_secs: u64,
+    ) -> Result<SessionTicket>;
+
+    fn validate_ticket_identity(
+        &self,
+        ticket_key: &[u8; 32],
+        identity: &[u8],
+        now_secs: u64,
+    ) -> Option<ValidatedTicket>;
+}
+
+/// Default Kyu2 handshake engine using authenticated X25519 + ticket resumption.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultHandshakeEngine;
+
+impl HandshakeEngine for DefaultHandshakeEngine {
+    fn build_client_hello(
+        &self,
+        session_id: u64,
+        client_public: [u8; 32],
+        psk: &[u8; 32],
+    ) -> HandshakePacket {
+        HandshakePacket::new_client(session_id, client_public, psk)
+    }
+
+    fn verify_client_hello(&self, packet: &HandshakePacket, psk: &[u8; 32]) -> bool {
+        packet.verify_client(psk)
+    }
+
+    fn build_server_hello(
+        &self,
+        session_id: u64,
+        server_public: [u8; 32],
+        client_public: [u8; 32],
+        psk: &[u8; 32],
+        session_ticket: Option<SessionTicket>,
+    ) -> HandshakePacket {
+        HandshakePacket::new_server(
+            session_id,
+            server_public,
+            client_public,
+            psk,
+            session_ticket,
+        )
+    }
+
+    fn verify_server_hello(
+        &self,
+        packet: &HandshakePacket,
+        psk: &[u8; 32],
+        client_public: [u8; 32],
+    ) -> bool {
+        packet.verify_server(psk, client_public)
+    }
+
+    fn derive_session_keys(
+        &self,
+        shared_secret: [u8; 32],
+        psk: &[u8; 32],
+        role: HandshakeRole,
+        context: &HandshakeContext,
+    ) -> Result<SessionKeys> {
+        derive_session_keys(shared_secret, psk, role, context)
+    }
+
+    fn build_resume_packet(&self, session_id: u64, ticket: &SessionTicket) -> ResumePacket {
+        ResumePacket::new_client(session_id, ticket)
+    }
+
+    fn verify_resume_packet(
+        &self,
+        packet: &ResumePacket,
+        resumption_secret: &[u8; 32],
+        now_secs: u64,
+    ) -> bool {
+        packet.verify(resumption_secret, now_secs)
+    }
+
+    fn derive_resumption_session_keys(
+        &self,
+        resumption_secret: [u8; 32],
+        role: HandshakeRole,
+        session_id: u64,
+        client_nonce: [u8; 24],
+    ) -> Result<SessionKeys> {
+        derive_resumption_session_keys(resumption_secret, role, session_id, client_nonce)
+    }
+
+    fn issue_session_ticket(
+        &self,
+        ticket_key: &[u8; 32],
+        lifetime_secs: u64,
+    ) -> Result<SessionTicket> {
+        issue_session_ticket(ticket_key, lifetime_secs)
+    }
+
+    fn validate_ticket_identity(
+        &self,
+        ticket_key: &[u8; 32],
+        identity: &[u8],
+        now_secs: u64,
+    ) -> Option<ValidatedTicket> {
+        validate_ticket_identity(ticket_key, identity, now_secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

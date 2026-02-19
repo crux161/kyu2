@@ -282,3 +282,60 @@ fn multiplexed_streams_and_session_churn_complete() {
         assert_eq!(recovered, original, "output mismatch for {:?}", input);
     }
 }
+
+#[test]
+fn sender_falls_back_to_trusted_relay_route_when_direct_handshake_fails() {
+    init();
+
+    let psk = [0x33; 32];
+    let in_dir = temp_dir("route-fallback-in");
+    let out_dir = temp_dir("route-fallback-out");
+    let input_file = in_dir.join("fallback.bin");
+    write_random_file(&input_file, 64 * 1024).expect("input should be written");
+
+    let Some(receiver) = skip_if_network_denied(
+        KyuReceiver::new_with_psk("127.0.0.1:0", &out_dir, psk)
+            .map_err(|error| io::Error::other(error.to_string())),
+    ) else {
+        return;
+    };
+    let receiver_addr = receiver
+        .local_addr()
+        .expect("receiver local addr should resolve");
+
+    let stop_receiver = Arc::new(AtomicBool::new(false));
+    let receiver_stop_clone = Arc::clone(&stop_receiver);
+    let receiver_handle = thread::spawn(move || {
+        let _ = receiver.run_loop_until(|_, _| {}, || receiver_stop_clone.load(Ordering::Relaxed));
+    });
+
+    let Some(mut sender) = skip_if_network_denied(
+        KyuSender::new_with_psk("127.0.0.1:9", psk)
+            .map_err(|error| io::Error::other(error.to_string())),
+    ) else {
+        stop_receiver.store(true, Ordering::Relaxed);
+        let _ = receiver_handle.join();
+        return;
+    };
+    sender.set_relay_routes([receiver_addr.to_string()]);
+    sender
+        .send_file(&input_file, 1.3, 10_000_000, |_| {})
+        .expect("send should succeed via relay fallback route");
+
+    let expected_out = out_dir.join("fallback.bin");
+    let expected_size = input_file
+        .metadata()
+        .expect("input metadata should be readable")
+        .len();
+    let completed = wait_until(Duration::from_secs(20), || {
+        expected_out
+            .metadata()
+            .map(|metadata| metadata.len() == expected_size)
+            .unwrap_or(false)
+    });
+
+    stop_receiver.store(true, Ordering::Relaxed);
+    receiver_handle.join().expect("receiver thread should join");
+
+    assert!(completed, "fallback route transfer did not complete");
+}

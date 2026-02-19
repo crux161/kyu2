@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
-use kyu2_core::{init, parse_psk_hex, KyuEvent, KyuReceiver, KyuSender};
+use clap::{Parser, Subcommand, ValueEnum};
+use kyu2_core::{
+    init, parse_psk_hex, CompressionMode, FecPolicy, KyuEvent, KyuReceiver, KyuSender, PaddingMode,
+    PipelineConfig, TransportConfig,
+};
 use rand::random;
 use serde_json::json;
 use std::cell::RefCell;
@@ -21,6 +24,25 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompressionArg {
+    Zstd,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PaddingArg {
+    Fixed,
+    Disabled,
+    Adaptive,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FecArg {
+    Adaptive,
+    Fixed,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Send {
@@ -28,6 +50,9 @@ enum Commands {
         input_files: Vec<String>,
         #[arg(long, default_value = "127.0.0.1:8080")]
         dest: String,
+        /// Trusted relay routes used when direct handshake fails. Repeat flag for a mesh list.
+        #[arg(long = "relay")]
+        relay_routes: Vec<String>,
         /// Optional 32-byte PSK in hex; otherwise uses KYU2_PSK or local auto-bootstrap lookup.
         #[arg(long)]
         psk: Option<String>,
@@ -37,6 +62,24 @@ enum Commands {
         /// Persist the latest resumption ticket to this path.
         #[arg(long)]
         ticket_out: Option<String>,
+        /// Compression mode for outbound blocks.
+        #[arg(long, value_enum, default_value_t = CompressionArg::Zstd)]
+        compression: CompressionArg,
+        /// Packet padding strategy.
+        #[arg(long, value_enum, default_value_t = PaddingArg::Fixed)]
+        padding: PaddingArg,
+        /// Fixed padding target size when `--padding fixed`.
+        #[arg(long, default_value_t = 1200)]
+        padding_size: usize,
+        /// Adaptive padding minimum packet size when `--padding adaptive`.
+        #[arg(long, default_value_t = 256)]
+        padding_min: usize,
+        /// Adaptive padding maximum packet size when `--padding adaptive`.
+        #[arg(long, default_value_t = 1200)]
+        padding_max: usize,
+        /// FEC strategy (`adaptive` uses receiver feedback; `fixed` keeps redundancy static).
+        #[arg(long, value_enum, default_value_t = FecArg::Adaptive)]
+        fec: FecArg,
         #[arg(long, default_value_t = 1.2)]
         redundancy: f32,
         /// Max bandwidth in Bytes per second (Default: 5 MB/s)
@@ -496,6 +539,46 @@ fn resolve_receiver_auth(
     })
 }
 
+fn build_transport_config(
+    compression: CompressionArg,
+    padding: PaddingArg,
+    padding_size: usize,
+    padding_min: usize,
+    padding_max: usize,
+    fec: FecArg,
+) -> TransportConfig {
+    let pipeline = PipelineConfig {
+        compression: match compression {
+            CompressionArg::Zstd => CompressionMode::Zstd { level: 1 },
+            CompressionArg::Off => CompressionMode::Disabled,
+        },
+    };
+    let padding = match padding {
+        PaddingArg::Fixed => PaddingMode::Fixed(padding_size.max(1)),
+        PaddingArg::Disabled => PaddingMode::Disabled,
+        PaddingArg::Adaptive => PaddingMode::Adaptive {
+            min: padding_min.max(1),
+            max: padding_max.max(padding_min.max(1)),
+        },
+    };
+    let fec = match fec {
+        FecArg::Adaptive => FecPolicy::Adaptive {
+            min: 1.0,
+            max: 4.0,
+            increase_step: 0.15,
+            decrease_step: 0.05,
+            high_watermark: 1.20,
+            low_watermark: 1.05,
+        },
+        FecArg::Fixed => FecPolicy::Fixed,
+    };
+    TransportConfig {
+        pipeline,
+        padding,
+        fec,
+    }
+}
+
 fn print_event_json(mode: &str, session_id: Option<u64>, event: &KyuEvent) {
     let record = match event {
         KyuEvent::Log(message) => json!({
@@ -802,14 +885,30 @@ fn main() -> Result<()> {
         Commands::Send {
             input_files,
             dest,
+            relay_routes,
             psk,
             ticket_in,
             ticket_out,
+            compression,
+            padding,
+            padding_size,
+            padding_min,
+            padding_max,
+            fec,
             redundancy,
             limit,
         } => {
             let sender_psk = resolve_sender_psk(&dest, psk.as_deref())?;
-            let mut sender = KyuSender::new_with_psk(&dest, sender_psk)?;
+            let transport = build_transport_config(
+                compression,
+                padding,
+                padding_size,
+                padding_min,
+                padding_max,
+                fec,
+            );
+            let mut sender = KyuSender::new_with_psk_and_config(&dest, sender_psk, transport)?;
+            sender.set_relay_routes(relay_routes);
 
             if let Some(ticket_path) = &ticket_in {
                 let blob = std::fs::read(ticket_path).with_context(|| {

@@ -1,0 +1,21 @@
+[package]
+name = "kyu2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kyu2-core = { path = "../kyu2-core" }
+
+[[bin]]
+name = "session_inputs"
+path = "fuzz_targets/session_inputs.rs"
+test = false
+doc = false
+bench = false
