@@ -7,7 +7,9 @@ pub mod session;
 pub use fec::{FecError, WirehairDecoder, WirehairEncoder};
 pub use handshake::{
     HandshakeContext, HandshakePacket, HandshakeRole, KeyExchange, PROTOCOL_BASELINE_CAPS,
-    PROTOCOL_VERSION, SessionKeys,
+    PROTOCOL_CAP_RESUMPTION, PROTOCOL_VERSION, ResumePacket, SessionKeys, SessionTicket,
+    ValidatedTicket, derive_resumption_session_keys, issue_session_ticket,
+    validate_ticket_identity,
 };
 pub use metadata::SessionManifest;
 pub use pipeline::KyuPipeline;

@@ -31,7 +31,7 @@ graph LR
 ## 🚀 Features
 
 * **Multiplexing:** Send hundreds of files simultaneously over a single UDP port. Head-of-Line (HoL) blocking is mathematically eliminated.
-* **1-RTT Handshake:** PSK-authenticated X25519 exchange establishes forward secrecy before any data flows.
+* **1-RTT + 0-RTT Handshakes:** New clients use PSK-authenticated X25519; recently authenticated clients can resume with encrypted tickets for 0-RTT startup.
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
 * **Adversarial Resistance:** Packet sizes are static (1200B), and sequence numbers are encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
@@ -65,6 +65,20 @@ export KYU2_PSK=00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
 **Sender (Multiplex multiple files over one session):**
 ```bash
 ./target/release/kyu2-cli send movie.mp4 archive.tar logs.zip --dest 127.0.0.1:8080 --redundancy 1.5
+```
+
+**Sender ticket persistence (for 0-RTT resumption across process restarts):**
+```bash
+# First run stores a fresh ticket
+./target/release/kyu2-cli send intro.mov --dest 127.0.0.1:8080 --ticket-out ./client.ticket
+
+# Later run reuses the ticket for 0-RTT resume
+./target/release/kyu2-cli send call_segment.bin --dest 127.0.0.1:8080 --ticket-in ./client.ticket --ticket-out ./client.ticket
+```
+
+**Receiver with explicit ticket key (recommended for persistent deployments):**
+```bash
+./target/release/kyu2-cli recv --bind 0.0.0.0:8080 --out-dir ./downloads --psk $KYU2_PSK --ticket-key 8899aabbccddeeff00112233445566778899aabbccddeeff0011223344556677
 ```
 
 **Relay (Recover and regenerate fresh packets to the next hop):**

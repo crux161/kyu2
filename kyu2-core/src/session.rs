@@ -1,4 +1,7 @@
-use crate::handshake::derive_session_keys;
+use crate::handshake::{
+    ResumePacket, SessionTicket, derive_resumption_session_keys, derive_session_keys,
+    issue_session_ticket, validate_ticket_identity,
+};
 use crate::{
     HandshakeContext, HandshakePacket, HandshakeRole, KeyExchange, KyuPipeline, PROTOCOL_VERSION,
     SessionKeys, SessionManifest, WirehairDecoder, WirehairEncoder,
@@ -14,7 +17,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Transfer block size for file chunking before encryption/FEC.
 const BLOCK_SIZE: usize = 1024 * 64;
@@ -42,6 +45,8 @@ const MAX_REDUNDANCY: f32 = 4.0;
 const HANDSHAKE_RETRIES: usize = 10;
 /// Handshake receive timeout for each retry.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default lifetime for issued 0-RTT session tickets.
+const SESSION_TICKET_LIFETIME_SECS: u64 = 6 * 60 * 60;
 /// Session timeout for garbage collection.
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Periodic GC sweep interval.
@@ -61,6 +66,7 @@ const SOURCE_BUCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 const TYPE_DATA: u8 = b'D';
 const TYPE_HANDSHAKE: u8 = b'H';
+const TYPE_RESUME: u8 = b'R';
 const TYPE_ACK: u8 = b'A';
 const TYPE_PING: u8 = b'P';
 const TYPE_PONG: u8 = b'O';
@@ -123,6 +129,22 @@ fn load_psk_from_env() -> Result<[u8; 32]> {
     let raw = std::env::var("KYU2_PSK")
         .context("Missing KYU2_PSK. Set a 64-char hex PSK for authenticated handshakes")?;
     parse_psk_hex(&raw)
+}
+
+/// Loads the optional ticket encryption key from `KYU2_TICKET_KEY`.
+/// Falls back to the handshake PSK when unset.
+fn load_ticket_key_from_env_or_psk(psk: [u8; 32]) -> Result<[u8; 32]> {
+    let Ok(raw) = std::env::var("KYU2_TICKET_KEY") else {
+        return Ok(psk);
+    };
+    parse_psk_hex(&raw)
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn parse_u64_le(bytes: &[u8]) -> Option<u64> {
@@ -278,6 +300,7 @@ struct OutboundStream {
 pub struct KyuSender {
     socket: UdpSocket,
     psk: [u8; 32],
+    resumption_ticket: Option<SessionTicket>,
     session_id: Option<u64>,
     session_keys: Option<SessionKeys>,
     next_stream_id: u32,
@@ -291,6 +314,15 @@ impl KyuSender {
 
     /// Creates a sender with an explicit PSK instead of environment loading.
     pub fn new_with_psk(dest: &str, psk: [u8; 32]) -> Result<Self> {
+        Self::new_with_psk_and_ticket(dest, psk, None)
+    }
+
+    /// Creates a sender with an explicit PSK and optional persisted resumption ticket.
+    pub fn new_with_psk_and_ticket(
+        dest: &str,
+        psk: [u8; 32],
+        ticket: Option<SessionTicket>,
+    ) -> Result<Self> {
         crate::init();
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.connect(dest)?;
@@ -300,10 +332,29 @@ impl KyuSender {
         Ok(Self {
             socket,
             psk,
+            resumption_ticket: ticket,
             session_id: None,
             session_keys: None,
             next_stream_id: seed,
         })
+    }
+
+    /// Imports a previously exported ticket blob (for example from iOS Keychain).
+    pub fn import_resumption_ticket(&mut self, blob: &[u8]) -> Result<()> {
+        let ticket = bincode::deserialize::<SessionTicket>(blob)
+            .context("Failed to deserialize resumption ticket blob")?;
+        self.resumption_ticket = Some(ticket);
+        Ok(())
+    }
+
+    /// Exports the latest ticket blob suitable for app-side secure storage.
+    pub fn export_resumption_ticket(&self) -> Result<Option<Vec<u8>>> {
+        let Some(ticket) = &self.resumption_ticket else {
+            return Ok(None);
+        };
+        Ok(Some(
+            bincode::serialize(ticket).context("Failed to serialize resumption ticket")?,
+        ))
     }
 
     /// Returns the local UDP socket address in use by the sender.
@@ -519,8 +570,18 @@ impl KyuSender {
         Ok(())
     }
 
-    /// Performs a PSK-authenticated handshake and derives directional session keys.
-    fn perform_handshake(&self) -> Result<(u64, SessionKeys)> {
+    /// Performs a 0-RTT resume when a valid ticket is present, otherwise falls back to 1-RTT.
+    fn perform_handshake(&mut self) -> Result<(u64, SessionKeys)> {
+        if let Some(ticket) = self.resumption_ticket.clone() {
+            match self.perform_resumption_0rtt(&ticket) {
+                Ok(resumed) => return Ok(resumed),
+                Err(_) => {
+                    // Drop stale/invalid ticket and continue with full 1-RTT bootstrap.
+                    self.resumption_ticket = None;
+                }
+            }
+        }
+
         self.socket.set_nonblocking(false)?;
         self.socket.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
 
@@ -566,6 +627,12 @@ impl KyuSender {
                 };
                 let keys =
                     derive_session_keys(shared_secret, &self.psk, HandshakeRole::Client, &context)?;
+
+                if let Some(ticket) = server_hello.session_ticket
+                    && ticket.expires_at > unix_now_secs()
+                {
+                    self.resumption_ticket = Some(ticket);
+                }
                 return Ok((session_id, keys));
             }
 
@@ -575,6 +642,27 @@ impl KyuSender {
         self.socket.set_nonblocking(true)?;
         self.socket.set_read_timeout(None)?;
         handshake_result
+    }
+
+    /// Sends a resumable client hello and immediately derives 0-RTT session keys.
+    fn perform_resumption_0rtt(&self, ticket: &SessionTicket) -> Result<(u64, SessionKeys)> {
+        if ticket.expires_at <= unix_now_secs() {
+            bail!("Resumption ticket is expired");
+        }
+
+        let session_id = rand::random::<u64>();
+        let resume = ResumePacket::new_client(session_id, ticket);
+        let mut packet = vec![TYPE_RESUME];
+        packet.extend(bincode::serialize(&resume)?);
+        self.socket.send(&packet)?;
+
+        let keys = derive_resumption_session_keys(
+            ticket.resumption_secret,
+            HandshakeRole::Client,
+            session_id,
+            resume.client_nonce,
+        )?;
+        Ok((session_id, keys))
     }
 
     /// Returns false if the receiver ACKed completion and requested early stop.
@@ -806,16 +894,28 @@ pub struct KyuReceiver {
     socket: UdpSocket,
     out_dir: PathBuf,
     psk: [u8; 32],
+    ticket_key: [u8; 32],
 }
 
 impl KyuReceiver {
     pub fn new(bind_addr: &str, out_dir: &Path) -> Result<Self> {
         let psk = load_psk_from_env()?;
-        Self::new_with_psk(bind_addr, out_dir, psk)
+        let ticket_key = load_ticket_key_from_env_or_psk(psk)?;
+        Self::new_with_psk_and_ticket_key(bind_addr, out_dir, psk, ticket_key)
     }
 
     /// Creates a receiver with an explicit PSK instead of environment loading.
     pub fn new_with_psk(bind_addr: &str, out_dir: &Path, psk: [u8; 32]) -> Result<Self> {
+        Self::new_with_psk_and_ticket_key(bind_addr, out_dir, psk, psk)
+    }
+
+    /// Creates a receiver with explicit bootstrap PSK and ticket encryption key.
+    pub fn new_with_psk_and_ticket_key(
+        bind_addr: &str,
+        out_dir: &Path,
+        psk: [u8; 32],
+        ticket_key: [u8; 32],
+    ) -> Result<Self> {
         crate::init();
         let socket = UdpSocket::bind(bind_addr)?;
         socket.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -824,6 +924,7 @@ impl KyuReceiver {
             socket,
             out_dir: out_dir.to_path_buf(),
             psk,
+            ticket_key,
         })
     }
 
@@ -880,6 +981,9 @@ impl KyuReceiver {
                     match packet[0] {
                         TYPE_HANDSHAKE => {
                             self.handle_handshake_packet(&mut runtime, packet, src, &on_event)
+                        }
+                        TYPE_RESUME => {
+                            self.handle_resume_packet(&mut runtime, packet, src, &on_event)
                         }
                         TYPE_PING => self.handle_ping_packet(&mut runtime, packet, src),
                         TYPE_DATA => self.handle_data_packet(&mut runtime, packet, src, &on_event),
@@ -1084,11 +1188,14 @@ impl KyuReceiver {
 
         let server_keys = KeyExchange::new();
         let server_public = *server_keys.public.as_bytes();
+        let session_ticket =
+            issue_session_ticket(&self.ticket_key, SESSION_TICKET_LIFETIME_SECS).ok();
         let reply = HandshakePacket::new_server(
             client_hello.session_id,
             server_public,
             client_hello.public_key,
             &self.psk,
+            session_ticket,
         );
 
         let mut response = vec![TYPE_HANDSHAKE];
@@ -1154,6 +1261,150 @@ impl KyuReceiver {
         );
         runtime.counters.handshakes_accepted += 1;
         on_event(client_hello.session_id, KyuEvent::HandshakeComplete);
+    }
+
+    fn handle_resume_packet<F>(
+        &self,
+        runtime: &mut ReceiverRuntime,
+        packet: &[u8],
+        src: SocketAddr,
+        on_event: &F,
+    ) where
+        F: Fn(u64, KyuEvent),
+    {
+        let Ok(resume) = bincode::deserialize::<ResumePacket>(&packet[1..]) else {
+            runtime.counters.handshakes_rejected += 1;
+            runtime.counters.packets_malformed += 1;
+            return;
+        };
+
+        if resume.protocol_version != PROTOCOL_VERSION {
+            runtime.counters.handshakes_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::VersionMismatch,
+                    message: "Rejected resume packet due to protocol version mismatch".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        }
+
+        let now_secs = unix_now_secs();
+        let Some(validated_ticket) =
+            validate_ticket_identity(&self.ticket_key, &resume.ticket_identity, now_secs)
+        else {
+            runtime.counters.handshakes_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::HandshakeAuth,
+                    message: "Rejected invalid or expired resumption ticket".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        };
+
+        if validated_ticket.expires_at != resume.expires_at
+            || !resume.verify(&validated_ticket.resumption_secret, now_secs)
+        {
+            runtime.counters.handshakes_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::HandshakeAuth,
+                    message: "Rejected resume binder verification".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        }
+
+        let is_new_session = !runtime.sessions.contains_key(&resume.session_id);
+        if is_new_session && runtime.sessions.len() >= MAX_SESSIONS {
+            runtime.counters.handshakes_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::SessionLimit,
+                    message: "Session limit reached; rejecting resumed session".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        }
+
+        if is_new_session {
+            let source_session_count = runtime
+                .sessions
+                .values()
+                .filter(|session| session.source_ip == src.ip())
+                .count();
+            if source_session_count >= MAX_SESSIONS_PER_SOURCE {
+                runtime.counters.handshakes_rejected += 1;
+                on_event(
+                    resume.session_id,
+                    KyuEvent::Fault {
+                        code: KyuErrorCode::SessionLimit,
+                        message: "Per-source session limit reached; rejecting resume".to_string(),
+                        session_id: Some(resume.session_id),
+                        stream_id: None,
+                        trace_id: None,
+                    },
+                );
+                return;
+            }
+        }
+
+        let Ok(session_keys) = derive_resumption_session_keys(
+            validated_ticket.resumption_secret,
+            HandshakeRole::Server,
+            resume.session_id,
+            resume.client_nonce,
+        ) else {
+            runtime.counters.handshakes_rejected += 1;
+            on_event(
+                resume.session_id,
+                KyuEvent::Fault {
+                    code: KyuErrorCode::Internal,
+                    message: "Failed to derive resumption session keys".to_string(),
+                    session_id: Some(resume.session_id),
+                    stream_id: None,
+                    trace_id: None,
+                },
+            );
+            return;
+        };
+
+        if let Some(previous) = runtime.sessions.remove(&resume.session_id) {
+            runtime.total_decoder_memory_bytes = runtime
+                .total_decoder_memory_bytes
+                .saturating_sub(previous.decoder_memory_bytes);
+        }
+
+        runtime.sessions.insert(
+            resume.session_id,
+            SessionState {
+                source_ip: src.ip(),
+                keys: session_keys,
+                pipeline: KyuPipeline::new(&session_keys.payload_rx),
+                streams: HashMap::new(),
+                decoder_memory_bytes: 0,
+                last_active: Instant::now(),
+            },
+        );
+        runtime.counters.handshakes_accepted += 1;
+        on_event(resume.session_id, KyuEvent::HandshakeComplete);
     }
 
     fn handle_ping_packet(&self, runtime: &mut ReceiverRuntime, packet: &[u8], src: SocketAddr) {

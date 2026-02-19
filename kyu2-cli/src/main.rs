@@ -28,6 +28,12 @@ enum Commands {
         /// 32-byte PSK in hex; falls back to KYU2_PSK env var when omitted.
         #[arg(long)]
         psk: Option<String>,
+        /// Load a previously exported resumption ticket from this path.
+        #[arg(long)]
+        ticket_in: Option<String>,
+        /// Persist the latest resumption ticket to this path.
+        #[arg(long)]
+        ticket_out: Option<String>,
         #[arg(long, default_value_t = 1.2)]
         redundancy: f32,
         /// Max bandwidth in Bytes per second (Default: 5 MB/s)
@@ -42,6 +48,9 @@ enum Commands {
         /// 32-byte PSK in hex; falls back to KYU2_PSK env var when omitted.
         #[arg(long)]
         psk: Option<String>,
+        /// 32-byte ticket key in hex; falls back to KYU2_TICKET_KEY, then PSK.
+        #[arg(long)]
+        ticket_key: Option<String>,
     },
     Relay {
         #[arg(long, default_value = "0.0.0.0:8081")]
@@ -53,6 +62,9 @@ enum Commands {
         /// 32-byte PSK in hex; falls back to KYU2_PSK env var when omitted.
         #[arg(long)]
         psk: Option<String>,
+        /// 32-byte ticket key in hex; falls back to KYU2_TICKET_KEY, then PSK.
+        #[arg(long)]
+        ticket_key: Option<String>,
         #[arg(long, default_value_t = 1.5)]
         redundancy: f32,
         #[arg(long, default_value_t = 5_000_000)]
@@ -381,6 +393,8 @@ fn main() -> Result<()> {
             input_files,
             dest,
             psk,
+            ticket_in,
+            ticket_out,
             redundancy,
             limit,
         } => {
@@ -389,6 +403,15 @@ fn main() -> Result<()> {
             } else {
                 KyuSender::new(&dest)?
             };
+
+            if let Some(ticket_path) = &ticket_in {
+                let blob = std::fs::read(ticket_path).with_context(|| {
+                    format!("Failed to read resumption ticket file: {ticket_path}")
+                })?;
+                sender.import_resumption_ticket(&blob).with_context(|| {
+                    format!("Failed to import resumption ticket from: {ticket_path}")
+                })?;
+            }
 
             let paths: Vec<PathBuf> = input_files.iter().map(PathBuf::from).collect();
             if !cli.json {
@@ -419,12 +442,45 @@ fn main() -> Result<()> {
                     }
                 })?;
             }
+
+            if let Some(ticket_path) = &ticket_out {
+                if let Some(blob) = sender.export_resumption_ticket()? {
+                    std::fs::write(ticket_path, blob).with_context(|| {
+                        format!("Failed to write resumption ticket file: {ticket_path}")
+                    })?;
+                    if !cli.json {
+                        println!(">>> Saved resumption ticket: {}", ticket_path);
+                    }
+                }
+            }
         }
-        Commands::Recv { bind, out_dir, psk } => {
-            let receiver = if let Some(psk_hex) = psk {
-                KyuReceiver::new_with_psk(&bind, Path::new(&out_dir), parse_psk_hex(&psk_hex)?)?
-            } else {
-                KyuReceiver::new(&bind, Path::new(&out_dir))?
+        Commands::Recv {
+            bind,
+            out_dir,
+            psk,
+            ticket_key,
+        } => {
+            let receiver = match (psk, ticket_key) {
+                (Some(psk_hex), Some(ticket_key_hex)) => KyuReceiver::new_with_psk_and_ticket_key(
+                    &bind,
+                    Path::new(&out_dir),
+                    parse_psk_hex(&psk_hex)?,
+                    parse_psk_hex(&ticket_key_hex)?,
+                )?,
+                (Some(psk_hex), None) => {
+                    KyuReceiver::new_with_psk(&bind, Path::new(&out_dir), parse_psk_hex(&psk_hex)?)?
+                }
+                (None, Some(ticket_key_hex)) => {
+                    let env_psk = std::env::var("KYU2_PSK")
+                        .context("Missing KYU2_PSK while using --ticket-key")?;
+                    KyuReceiver::new_with_psk_and_ticket_key(
+                        &bind,
+                        Path::new(&out_dir),
+                        parse_psk_hex(&env_psk)?,
+                        parse_psk_hex(&ticket_key_hex)?,
+                    )?
+                }
+                (None, None) => KyuReceiver::new(&bind, Path::new(&out_dir))?,
             };
 
             let stream_states: RefCell<HashMap<u32, StreamUiState>> = RefCell::new(HashMap::new());
@@ -441,6 +497,7 @@ fn main() -> Result<()> {
             forward,
             spool_dir,
             psk,
+            ticket_key,
             redundancy,
             limit,
         } => {
@@ -453,7 +510,16 @@ fn main() -> Result<()> {
                 parse_psk_hex(&env_psk)?
             };
 
-            let receiver = KyuReceiver::new_with_psk(&bind, Path::new(&spool_dir), psk_bytes)?;
+            let receiver = if let Some(ticket_key_hex) = ticket_key {
+                KyuReceiver::new_with_psk_and_ticket_key(
+                    &bind,
+                    Path::new(&spool_dir),
+                    psk_bytes,
+                    parse_psk_hex(&ticket_key_hex)?,
+                )?
+            } else {
+                KyuReceiver::new_with_psk(&bind, Path::new(&spool_dir), psk_bytes)?
+            };
             let forward_sender = RefCell::new(KyuSender::new_with_psk(&forward, psk_bytes)?);
             let relay_sender_states: RefCell<HashMap<u32, StreamUiState>> =
                 RefCell::new(HashMap::new());
