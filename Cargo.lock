@@ -485,9 +485,6 @@ dependencies = [
 [[package]]
 name = "kyu2"
 version = "0.1.0"
-dependencies = [
- "rand",
-]
 
 [[package]]
 name = "kyu2-cli"
