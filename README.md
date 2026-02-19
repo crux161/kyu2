@@ -33,7 +33,7 @@ graph LR
 * **Multiplexing:** Send hundreds of files simultaneously over a single UDP port. Head-of-Line (HoL) blocking is mathematically eliminated.
 * **1-RTT Handshake:** Ephemeral X25519 key exchange establishes forward secrecy before any data flows.
 * **Self-Healing Mesh:** Intermediate relay nodes can recover and mathematically regenerate fresh packets for destination nodes.
-* **Adversarial Resistance:** Packet sizes are static (1400B), and sequence numbers are encrypted.
+* **Adversarial Resistance:** Packet sizes are static (1200B), and sequence numbers are encrypted.
 * **Stateless Decoding:** Every packet contains enough masked geometry to initialize a decoder.
 
 ---
